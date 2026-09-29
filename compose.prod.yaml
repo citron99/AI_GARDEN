@@ -98,7 +98,8 @@ services:
     logging: *default-logging
 
   proxy:
-    image: caddy:2.10-alpine
+    # Docker Hub pull-through mirror (Docker Hub auth fails on this host)
+    image: mirror.gcr.io/library/caddy:2.10-alpine
     environment:
       PUBLIC_DOMAIN: ${PUBLIC_DOMAIN:?PUBLIC_DOMAIN is required}
       MAX_REQUEST_BODY_MB: ${MAX_REQUEST_BODY_MB:-60}
