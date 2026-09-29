@@ -271,6 +271,12 @@ def _cosine(left: list[float], right: list[float]) -> float:
     return sum(a * b for a, b in zip(left, right, strict=False))
 
 
+def _similarity_from_distance(distance: float | None) -> float:
+    # pgvector даёт 0.0 для идентичных векторов; проверка `is None` важна,
+    # иначе точное совпадение получало бы худшую оценку (0.0 вместо 1.0).
+    return 0.0 if distance is None else 1.0 - float(distance)
+
+
 def _retrieve_from_database(
     db: Session,
     query: str,
@@ -293,7 +299,13 @@ def _retrieve_from_database(
     )
     if db.bind is not None and db.bind.dialect.name == "postgresql":
         chunks = list(db.scalars(base.order_by(KnowledgeChunk.embedding.cosine_distance(query_embedding)).limit(limit * 4)))
-        semantic = {chunk.id: 1.0 - float(db.scalar(select(KnowledgeChunk.embedding.cosine_distance(query_embedding)).where(KnowledgeChunk.id == chunk.id)) or 1.0) for chunk in chunks}
+        semantic = {
+            chunk.id: _similarity_from_distance(db.scalar(
+                select(KnowledgeChunk.embedding.cosine_distance(query_embedding))
+                .where(KnowledgeChunk.id == chunk.id)
+            ))
+            for chunk in chunks
+        }
     else:
         chunks = list(db.scalars(base))
         semantic = {chunk.id: _cosine(query_embedding, list(chunk.embedding)) for chunk in chunks}

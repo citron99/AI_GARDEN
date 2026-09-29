@@ -5,8 +5,11 @@ from io import BytesIO
 from pathlib import Path
 from threading import Event, Lock
 
+import pytest
+from fastapi import HTTPException
 from PIL import Image
 from sqlalchemy import select
+from sqlalchemy.dialects import postgresql
 
 import app.main as main_module
 from app.ai.base import AIProviderError
@@ -139,6 +142,39 @@ def test_host_body_limit_and_production_hsts(client, monkeypatch):
     monkeypatch.setattr(settings, "environment", "production")
     response = client.get("/health")
     assert response.headers["strict-transport-security"].startswith("max-age=31536000")
+
+
+def test_request_body_limit_applies_to_chunked_bodies_without_content_length(client, monkeypatch):
+    # Лимит занижен точечно: валидация диапазона 10..200 МБ идёт на старте приложения,
+    # а тесту незачем прогонять десятки мегабайт через транспорт.
+    monkeypatch.setattr(settings, "max_request_body_mb", 1)
+
+    def oversized_chunks():
+        for _ in range(3):  # ~1.5 МБ > 1 МБ, Transfer-Encoding: chunked
+            yield b"x" * (512 * 1024)
+
+    too_large = client.post(
+        "/api/v1/auth/login",
+        content=oversized_chunks(),
+        headers={"accept-language": "en", "content-type": "application/json"},
+    )
+    assert too_large.status_code == 413
+    assert too_large.json()["detail"] == "The request is too large"
+
+
+def test_chunked_request_body_under_limit_is_processed(client):
+    register(client)
+
+    def login_body():
+        yield b'{"email": "user@example.com", "password": "strong-password"}'
+
+    response = client.post(
+        "/api/v1/auth/login",
+        content=login_body(),
+        headers={"content-type": "application/json"},
+    )
+    assert response.status_code == 200
+    assert response.json()["access_token"]
 
 
 def test_public_privacy_config_exposes_only_public_retention_metadata(client):
@@ -2813,6 +2849,31 @@ def test_photo_upload_rate_limit_and_storage_quota(client, monkeypatch):
         ).status_code
         == 413
     )
+
+
+def test_photo_quota_reservation_locks_user_row(monkeypatch):
+    class RecordingSession:
+        def __init__(self, inner):
+            self._inner = inner
+            self.scalar_statements = []
+
+        def scalar(self, statement, *args, **kwargs):
+            self.scalar_statements.append(statement)
+            return self._inner.scalar(statement, *args, **kwargs)
+
+    with SessionLocal() as db:
+        recorder = RecordingSession(db)
+        main_module._reserve_photo_storage(recorder, user_id=1, incoming_bytes=10)
+    lock_statement, sum_statement = recorder.scalar_statements
+    compiled_lock = str(lock_statement.compile(dialect=postgresql.dialect()))
+    assert "FOR UPDATE" in compiled_lock
+    assert "SKIP LOCKED" not in compiled_lock
+    assert "sum(" in str(sum_statement.compile(dialect=postgresql.dialect()))
+
+    monkeypatch.setattr(settings, "user_storage_quota_mb", 0)
+    with SessionLocal() as db, pytest.raises(HTTPException) as failure:
+        main_module._reserve_photo_storage(db, user_id=1, incoming_bytes=1)
+    assert failure.value.status_code == 413
 
 
 def test_rejects_mime_mismatch_and_tiny_image(client):

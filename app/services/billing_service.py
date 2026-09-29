@@ -143,8 +143,13 @@ def _metadata_user_id(obj: dict) -> int | None:
         return None
 
 
+def _incoming_subscription_id(obj: dict) -> str | None:
+    value = obj.get("subscription") or obj.get("id")
+    return value if isinstance(value, str) else None
+
+
 def _find_subscription(db: Session, obj: dict) -> Subscription | None:
-    external_subscription = obj.get("subscription") or obj.get("id")
+    external_subscription = _incoming_subscription_id(obj)
     customer = obj.get("customer")
     clauses = []
     if isinstance(external_subscription, str):
@@ -156,6 +161,18 @@ def _find_subscription(db: Session, obj: dict) -> Subscription | None:
         if subscription:
             return subscription
     return None
+
+
+def _matches_stored_subscription(subscription: Subscription, obj: dict) -> bool:
+    """True, если событие относится к этой подписке.
+
+    Событие без явного идентификатора подписки или строка без сохранённого ID
+    (например, только что созданная) считаются совместимыми: идентификатор будет
+    проставлен из события ниже. Событие с другим ID — это чужая подписка того же
+    покупателя, её нельзя применять к текущей строке.
+    """
+    incoming = _incoming_subscription_id(obj)
+    return incoming is None or subscription.provider_subscription_id in (None, incoming)
 
 
 def _upsert_subscription(db: Session, obj: dict) -> Subscription | None:
@@ -193,6 +210,10 @@ def process_stripe_event(db: Session, event: dict) -> bool:
                 db.add(BillingEvent(provider_event_id=event_id, event_type=event_type, processed=False))
                 db.commit()
                 return True
+            if not _matches_stored_subscription(subscription, obj):
+                db.add(BillingEvent(provider_event_id=event_id, event_type=event_type, processed=False))
+                db.commit()
+                return True
             items = ((obj.get("items") or {}).get("data") or [])
             price_id = None
             if items and isinstance(items[0], dict):
@@ -203,7 +224,11 @@ def process_stripe_event(db: Session, event: dict) -> bool:
             if event_type == "customer.subscription.deleted":
                 subscription.status = "canceled"
                 from app.services.account_deletion_service import finalize_account_deletion
-                finalize_account_deletion(db, subscription.user_id)
+                finalize_account_deletion(
+                    db,
+                    subscription.user_id,
+                    provider_subscription_id=_incoming_subscription_id(obj),
+                )
             elif price_id != settings.stripe_price_pro_monthly:
                 subscription.status = "unsupported_price"
             else:
@@ -216,7 +241,7 @@ def process_stripe_event(db: Session, event: dict) -> bool:
             processed = True
     elif isinstance(obj, dict) and event_type == "invoice.payment_failed":
         subscription = _find_subscription(db, obj)
-        if subscription:
+        if subscription and _matches_stored_subscription(subscription, obj):
             last_event_at = _utc(subscription.last_event_created_at)
             if not last_event_at or not event_created_at or event_created_at >= last_event_at:
                 subscription.status = "past_due"

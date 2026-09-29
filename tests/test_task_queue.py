@@ -100,7 +100,12 @@ def test_production_compose_contains_worker_and_persistent_redis():
     assert "TRUSTED_HOSTS:" in compose
     caddyfile = Path("Caddyfile").read_text(encoding="utf-8")
     assert "request_body" in caddyfile
+    assert "max_size {$MAX_REQUEST_BODY_MB:60}MB" in caddyfile
     assert "reverse_proxy api:8000" in caddyfile
+    body_limit_env = "MAX_REQUEST_BODY_MB: ${MAX_REQUEST_BODY_MB:-60}"
+    assert compose.count(body_limit_env) == 2, (
+        "лимит тела должен приходить и приложению (anchor), и Caddy (proxy) из одной переменной"
+    )
 
 
 def test_docker_image_contains_web_and_ci_runs_smoke_test():

@@ -25,6 +25,7 @@ from sqlalchemy import func, or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from starlette.middleware.trustedhost import TrustedHostMiddleware
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app.ai import create_ai_gateway
 from app.auth import (
@@ -185,20 +186,64 @@ async def localized_http_exception(request: Request, exc: HTTPException) -> JSON
     return JSONResponse(status_code=exc.status_code, content={"detail": detail}, headers=exc.headers)
 
 
-@app.middleware("http")
-async def request_body_limit(request: Request, call_next):
-    content_length = request.headers.get("content-length")
-    limit = settings.max_request_body_mb * 1024 * 1024
-    if content_length:
-        try:
-            too_large = int(content_length) > limit
-        except ValueError:
-            too_large = True
-        if too_large:
-            language = normalize_language(request.headers.get("accept-language"))
-            detail = translate_http_error("Тело запроса слишком большое", language, 413)
-            return JSONResponse(status_code=413, content={"detail": detail})
-    return await call_next(request)
+_BODY_TOO_LARGE_DETAIL = "Тело запроса слишком большое"
+
+
+def _request_header(scope: Scope, name: bytes) -> str | None:
+    for header_name, value in scope.get("headers") or []:
+        if header_name == name:
+            return value.decode("latin-1")
+    return None
+
+
+async def _send_request_too_large(scope: Scope, receive: Receive, send: Send) -> None:
+    language = normalize_language(_request_header(scope, b"accept-language"))
+    detail = translate_http_error(_BODY_TOO_LARGE_DETAIL, language, 413)
+    await JSONResponse(status_code=413, content={"detail": detail})(scope, receive, send)
+
+
+class RequestBodyLimitMiddleware:
+    """Ограничивает тело запроса по фактически прочитанным байтам.
+
+    Проверять только Content-Length недостаточно: chunked-запрос может нести
+    тело любого размера вообще без этого заголовка. BaseHTTPMiddleware не умеет
+    оборачивать receive нижележащего приложения, поэтому лимит живёт в чистом
+    ASGI-слое, а превышение поднимается как HTTPException — его локализует общий
+    обработчик ошибок.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        limit = settings.max_request_body_mb * 1024 * 1024
+        declared_length = _request_header(scope, b"content-length")
+        if declared_length is not None:
+            try:
+                declared_size = int(declared_length)
+            except ValueError:
+                declared_size = limit + 1
+            if declared_size > limit:
+                await _send_request_too_large(scope, receive, send)
+                return
+        received_bytes = 0
+
+        async def limited_receive() -> Message:
+            nonlocal received_bytes
+            message = await receive()
+            if message["type"] == "http.request":
+                received_bytes += len(message.get("body") or b"")
+                if received_bytes > limit:
+                    raise HTTPException(413, _BODY_TOO_LARGE_DETAIL)
+            return message
+
+        await self.app(scope, limited_receive, send)
+
+
+app.add_middleware(RequestBodyLimitMiddleware)
 
 
 @app.middleware("http")
@@ -1467,13 +1512,7 @@ async def upload_photos(plant_id: int, files: list[UploadFile] = File(...), user
         except ImageValidationError as exc:
             raise HTTPException(exc.status_code, exc.detail)
 
-    used_storage = db.scalar(
-        select(func.coalesce(func.sum(PlantPhoto.size_bytes), 0))
-        .join(Plant).join(Garden).where(Garden.user_id == user.id)
-    ) or 0
-    quota_bytes = settings.user_storage_quota_mb * 1024 * 1024
-    if used_storage + sum(len(image.content) for image in prepared) > quota_bytes:
-        raise HTTPException(413, "Квота хранения фотографий исчерпана")
+    _reserve_photo_storage(db, user.id, sum(len(image.content) for image in prepared))
 
     saved: list[PlantPhoto] = []
     stored: list[PlantPhoto] = []
@@ -1499,6 +1538,20 @@ async def upload_photos(plant_id: int, files: list[UploadFile] = File(...), user
     for photo in saved:
         db.refresh(photo)
     return saved
+
+
+def _reserve_photo_storage(db: Session, user_id: int, incoming_bytes: int) -> None:
+    # Блокировка строки пользователя сериализует параллельные загрузки: без неё
+    # две загрузки могут вместе превысить квоту (на SQLite блокировка — no-op).
+    # skip_locked недопустим: второй запрос должен дождаться первого и пересчитать сумму.
+    db.scalar(select(User.id).where(User.id == user_id).with_for_update())
+    used_storage = db.scalar(
+        select(func.coalesce(func.sum(PlantPhoto.size_bytes), 0))
+        .join(Plant).join(Garden).where(Garden.user_id == user_id)
+    ) or 0
+    quota_bytes = settings.user_storage_quota_mb * 1024 * 1024
+    if used_storage + incoming_bytes > quota_bytes:
+        raise HTTPException(413, "Квота хранения фотографий исчерпана")
 
 
 def _create_and_dispatch_diagnosis_job(payload: DiagnosisCreate, user: User, db: Session) -> DiagnosisJob:

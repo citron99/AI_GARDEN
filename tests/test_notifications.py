@@ -1,6 +1,7 @@
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
+from sqlalchemy.dialects import postgresql
 
 from app.database import SessionLocal
 from app.models import TelegramAccount, User, UserNotification
@@ -38,6 +39,13 @@ def test_pending_notification_is_delivered_to_telegram_once(client, monkeypatch)
         assert item.telegram_sent_at is not None
         assert item.delivery_attempts == 1
     assert sent_messages == [(123456, "Seasonal task\nPrepare frost protection")]
+
+
+def test_pending_delivery_query_locks_rows_on_postgres():
+    now = datetime(2026, 7, 13, 8, tzinfo=UTC)
+    statement = notification_service._pending_notifications_query(now)
+    compiled = str(statement.compile(dialect=postgresql.dialect()))
+    assert "FOR UPDATE SKIP LOCKED" in compiled
 
 
 def _jpeg_bytes():

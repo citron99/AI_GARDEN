@@ -281,3 +281,96 @@ def test_paid_account_deletion_waits_for_stripe_webhook(client, monkeypatch):
     with SessionLocal() as db:
         assert db.get(User, user_id) is None
         assert db.scalar(select(StorageDeletionOutbox.id)) is None
+
+
+def test_deleted_event_for_other_subscription_does_not_touch_current_one(client, monkeypatch):
+    headers = register(client, "multi-subscription@example.com")
+    user_id = client.get("/api/v1/users/me", headers=headers).json()["id"]
+    with SessionLocal() as db:
+        db.add(Subscription(
+            user_id=user_id,
+            plan="pro",
+            provider="stripe",
+            provider_customer_id="cus_multi",
+            provider_subscription_id="sub_current",
+            status="active",
+        ))
+        db.commit()
+
+    secret = "whsec_multi-subscription-test"
+    monkeypatch.setattr(settings, "billing_provider", "stripe")
+    monkeypatch.setattr(settings, "stripe_webhook_secret", secret)
+    monkeypatch.setattr(settings, "stripe_price_pro_monthly", "price_pro_test")
+    event = {
+        "id": "evt_deleted_previous_subscription",
+        "type": "customer.subscription.deleted",
+        "created": int(time.time()),
+        "data": {"object": {
+            "id": "sub_previous",
+            "customer": "cus_multi",
+            "status": "canceled",
+            "items": {"data": [{"price": {"id": "price_pro_test"}}]},
+        }},
+    }
+    payload, signature = signed_payload(event, secret)
+    webhook = client.post(
+        "/api/v1/billing/stripe/webhook", content=payload,
+        headers={"Stripe-Signature": signature},
+    )
+    assert webhook.status_code == 200
+    with SessionLocal() as db:
+        subscription = db.scalar(select(Subscription).where(Subscription.user_id == user_id))
+        assert subscription.status == "active"
+        assert subscription.provider_subscription_id == "sub_current"
+        event_row = db.scalar(select(BillingEvent).where(
+            BillingEvent.provider_event_id == "evt_deleted_previous_subscription",
+        ))
+        assert event_row is not None and not event_row.processed
+
+
+def test_subscription_deleted_event_does_not_finalize_unrelated_request(client, monkeypatch):
+    headers = register(client, "swapped-subscription@example.com")
+    user_id = client.get("/api/v1/users/me", headers=headers).json()["id"]
+    with SessionLocal() as db:
+        db.add(Subscription(
+            user_id=user_id,
+            plan="pro",
+            provider="stripe",
+            provider_customer_id="cus_swapped",
+            provider_subscription_id="sub_current",
+            status="active",
+        ))
+        db.add(AccountDeletionRequest(
+            user_id=user_id,
+            provider_subscription_id="sub_other",
+            status="awaiting_webhook",
+        ))
+        db.commit()
+
+    secret = "whsec_swapped-subscription-test"
+    monkeypatch.setattr(settings, "billing_provider", "stripe")
+    monkeypatch.setattr(settings, "stripe_webhook_secret", secret)
+    monkeypatch.setattr(settings, "stripe_price_pro_monthly", "price_pro_test")
+    event = {
+        "id": "evt_deleted_current_subscription",
+        "type": "customer.subscription.deleted",
+        "created": int(time.time()),
+        "data": {"object": {
+            "id": "sub_current",
+            "customer": "cus_swapped",
+            "status": "canceled",
+            "items": {"data": [{"price": {"id": "price_pro_test"}}]},
+        }},
+    }
+    payload, signature = signed_payload(event, secret)
+    webhook = client.post(
+        "/api/v1/billing/stripe/webhook", content=payload,
+        headers={"Stripe-Signature": signature},
+    )
+    assert webhook.status_code == 200
+    with SessionLocal() as db:
+        assert db.get(User, user_id) is not None
+        deletion = db.scalar(select(AccountDeletionRequest).where(
+            AccountDeletionRequest.user_id == user_id,
+        ))
+        assert deletion.status == "awaiting_webhook"

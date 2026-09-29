@@ -106,9 +106,8 @@ def generate_due_notifications(
     return created
 
 
-def deliver_pending_telegram_notifications(db: Session, *, now: datetime | None = None) -> tuple[int, int]:
-    now = _aware(now or datetime.now(UTC)).astimezone(UTC)
-    rows = db.execute(
+def _pending_notifications_query(now: datetime):
+    return (
         select(UserNotification, TelegramAccount)
         .join(TelegramAccount, TelegramAccount.user_id == UserNotification.user_id)
         .where(
@@ -120,7 +119,15 @@ def deliver_pending_telegram_notifications(db: Session, *, now: datetime | None 
         )
         .order_by(UserNotification.created_at)
         .limit(200)
-    ).all()
+        # Параллельный воркер пропускает уже заблокированные строки,
+        # чтобы не отправить одно уведомление дважды (на SQLite — no-op).
+        .with_for_update(skip_locked=True)
+    )
+
+
+def deliver_pending_telegram_notifications(db: Session, *, now: datetime | None = None) -> tuple[int, int]:
+    now = _aware(now or datetime.now(UTC)).astimezone(UTC)
+    rows = db.execute(_pending_notifications_query(now)).all()
     sent = failed = 0
     for notification, account in rows:
         notification.delivery_attempts += 1

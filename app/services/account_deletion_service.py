@@ -48,7 +48,11 @@ def mark_cancellation_retry(db: Session, request: AccountDeletionRequest, error:
     db.commit()
 
 
-def finalize_account_deletion(db: Session, user_id: int) -> bool:
+def finalize_account_deletion(
+    db: Session,
+    user_id: int,
+    provider_subscription_id: str | None = None,
+) -> bool:
     user = db.get(User, user_id)
     if user is None:
         return False
@@ -56,6 +60,12 @@ def finalize_account_deletion(db: Session, user_id: int) -> bool:
         AccountDeletionRequest.user_id == user_id,
     ))
     if request is None or request.status not in {"awaiting_webhook", "pending_cancellation"}:
+        return False
+    if (
+        provider_subscription_id
+        and request.provider_subscription_id
+        and request.provider_subscription_id != provider_subscription_id
+    ):
         return False
     photos = list(db.scalars(
         select(PlantPhoto).join(Plant).join(Garden).where(Garden.user_id == user_id)
