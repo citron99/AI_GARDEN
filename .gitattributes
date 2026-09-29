@@ -1,0 +1,8 @@
+.env export-ignore
+.venv export-ignore
+.agents export-ignore
+uploads export-ignore
+test_uploads export-ignore
+*.db export-ignore
+*.zip export-ignore
+*.sh text eol=lf

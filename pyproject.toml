@@ -1,0 +1,57 @@
+[project]
+name = "ai-garden"
+version = "0.1.0"
+description = "AI-помощник садовода: диагностика растений по фото, каталог, уход, биллинг"
+requires-python = ">=3.12"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "E4", "E7", "E9",  # pycodestyle (базовый набор ruff по умолчанию)
+    "F",               # pyflakes
+    "I",               # isort
+    "B",               # flake8-bugbear
+    "BLE",             # blind except
+    "DTZ011",          # наивный date.today()
+    "SIM",             # упрощения
+    "S",               # bandit
+    "UP",              # pyupgrade
+    "PLR0402",         # ручной from-import
+    "RUF043",          # pytest.raises с неэкранированным паттерном
+    "RUF100",          # неиспользуемый noqa
+]
+ignore = [
+    # Проект намеренно использует кириллицу и типографские символы в строках/комментариях
+    "RUF001",
+    "RUF002",
+    "RUF003",
+    # API намеренно преобразует внутренние исключения в HTTPException без цепочки
+    "B904",
+]
+
+[tool.ruff.lint.flake8-bugbear]
+# Depends()/Query() и другие вызовы FastAPI в default-аргументах — штатный паттерн фреймворка
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.Query",
+    "fastapi.Path",
+    "fastapi.Body",
+    "fastapi.Header",
+    "fastapi.Cookie",
+    "fastapi.File",
+    "fastapi.Form",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Тесты: assert и тестовые секреты допустимы
+"tests/**" = ["S101", "S105", "S106", "S107"]
+# Сравнения date.today() с колонками типа Date (без времени) — корректны
+"app/catalog.py" = ["DTZ011"]
+"app/services/**" = ["DTZ011"]
+
+[tool.pytest.ini_options]
+timeout = 90
+timeout_method = "thread"

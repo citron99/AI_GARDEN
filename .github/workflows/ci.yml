@@ -1,0 +1,116 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install --require-hashes -r requirements-dev.lock
+      - name: Audit production and development dependencies
+        run: |
+          pip-audit -r requirements.lock
+          pip-audit -r requirements-dev.lock
+      - run: ruff check app tests migrations evals
+      # signal-метод таймаута работает на Linux без оверхеда thread-метода (Windows-разработчики используют thread из pyproject.toml)
+      - run: pytest -q -o timeout_method=signal
+
+  browser-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - run: pip install --require-hashes -r requirements.lock
+      - run: npm ci --no-audit --no-fund
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 7
+
+  docker-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t ai-garden:smoke .
+      - name: Start and verify health
+        shell: bash
+        run: |
+          docker run -d --name ai-garden-smoke -p 18000:8000 \
+            -e ENVIRONMENT=development \
+            -e AI_PROVIDER=mock \
+            -e JWT_SECRET=ci-random-jwt-secret-that-is-longer-than-thirty-two \
+            -e AI_SAFETY_SECRET=ci-random-safety-secret-that-is-longer-than-thirty-two \
+            -e PARTNER_ATTRIBUTION_SECRET=ci-random-partner-secret-that-is-longer-than-thirty-two \
+            ai-garden:smoke
+          trap 'docker logs ai-garden-smoke; docker rm -f ai-garden-smoke' EXIT
+          for attempt in {1..30}; do
+            curl --fail --silent http://127.0.0.1:18000/health && exit 0
+            sleep 1
+          done
+          exit 1
+
+  postgres-migrations:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.2-pg17
+        env:
+          POSTGRES_DB: gardener_test
+          POSTGRES_USER: gardener
+          POSTGRES_PASSWORD: test-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U gardener -d gardener_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install --require-hashes -r requirements-dev.lock
+      - name: Upgrade, check, and downgrade real pgvector database
+        env:
+          DATABASE_URL: postgresql+psycopg://gardener:test-password@127.0.0.1:5432/gardener_test
+          JWT_SECRET: ci-random-jwt-secret-that-is-longer-than-thirty-two
+          AI_SAFETY_SECRET: ci-random-safety-secret-that-is-longer-than-thirty-two
+          PARTNER_ATTRIBUTION_SECRET: ci-random-partner-secret-that-is-longer-than-thirty-two
+          AI_PROVIDER: mock
+          ENVIRONMENT: test
+        run: |
+          alembic upgrade head
+          alembic check
+          alembic downgrade base
+      - name: PostgreSQL lease concurrency and recovery tests
+        env:
+          TEST_DATABASE_URL: postgresql+psycopg://gardener:test-password@127.0.0.1:5432/gardener_test
+          JWT_SECRET: ci-random-jwt-secret-that-is-longer-than-thirty-two
+          AI_SAFETY_SECRET: ci-random-safety-secret-that-is-longer-than-thirty-two
+          PARTNER_ATTRIBUTION_SECRET: ci-random-partner-secret-that-is-longer-than-thirty-two
+          AI_PROVIDER: mock
+          ENVIRONMENT: test
+        run: >-
+          pytest -q -o timeout_method=signal
+          tests/test_api.py::test_diagnosis_job_lease_prevents_two_paid_ai_calls
+          tests/test_maintenance.py::test_recovery_reserves_expired_and_orphaned_jobs_and_fails_exhausted_attempts

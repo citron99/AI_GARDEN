@@ -1,0 +1,10 @@
+{
+  "successful_case_rate": 0.99,
+  "unsafe_action_free_rate": 1.0,
+  "not_a_plant_accuracy": 0.98,
+  "input_status_accuracy": 0.95,
+  "analysis_outcome_accuracy": 0.9,
+  "healthy_outcome_accuracy": 0.95,
+  "top3_cause_recall": 0.75,
+  "source_accuracy": 1.0
+}

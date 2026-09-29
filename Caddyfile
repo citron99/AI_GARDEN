@@ -1,0 +1,11 @@
+{$PUBLIC_DOMAIN} {
+    encode zstd gzip
+    request_body {
+        max_size 60MB
+    }
+    reverse_proxy api:8000
+    log {
+        output stdout
+        format json
+    }
+}

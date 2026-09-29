@@ -1,0 +1,18 @@
+services:
+  api:
+    build: .
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: sqlite:////app/data/gardener.db
+      UPLOAD_DIR: /app/uploads
+    ports:
+      - "8000:8000"
+    volumes:
+      - gardener_data:/app/data
+      - gardener_uploads:/app/uploads
+    restart: unless-stopped
+
+volumes:
+  gardener_data:
+  gardener_uploads:

@@ -1,0 +1,189 @@
+x-runtime-environment: &runtime-environment
+  ENVIRONMENT: production
+  DATABASE_URL: postgresql+psycopg://gardener:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@db:5432/gardener
+  UPLOAD_DIR: /app/uploads
+  STORAGE_BACKEND: s3
+  S3_BUCKET: ${S3_BUCKET:?S3_BUCKET is required}
+  S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-}
+  S3_REGION: ${S3_REGION:-eu-central-1}
+  S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:?S3_ACCESS_KEY_ID is required}
+  S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:?S3_SECRET_ACCESS_KEY is required}
+  EMAIL_DELIVERY_MODE: smtp
+  SMTP_HOST: ${SMTP_HOST:?SMTP_HOST is required}
+  SMTP_PORT: ${SMTP_PORT:-587}
+  SMTP_USERNAME: ${SMTP_USERNAME:?SMTP_USERNAME is required}
+  SMTP_PASSWORD: ${SMTP_PASSWORD:?SMTP_PASSWORD is required}
+  SMTP_FROM_EMAIL: ${SMTP_FROM_EMAIL:?SMTP_FROM_EMAIL is required}
+  PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:?PUBLIC_BASE_URL is required}
+  TRUSTED_HOSTS: ${PUBLIC_DOMAIN:?PUBLIC_DOMAIN is required}
+  MAX_REQUEST_BODY_MB: ${MAX_REQUEST_BODY_MB:-60}
+  FORWARDED_ALLOW_IPS: "*"
+  DATA_CONTROLLER_NAME: ${DATA_CONTROLLER_NAME:?DATA_CONTROLLER_NAME is required}
+  PRIVACY_CONTACT_EMAIL: ${PRIVACY_CONTACT_EMAIL:?PRIVACY_CONTACT_EMAIL is required}
+  LEGAL_DOCUMENT_VERSION: ${LEGAL_DOCUMENT_VERSION:?LEGAL_DOCUMENT_VERSION is required}
+  LEGAL_DOCUMENT_EFFECTIVE_DATE: ${LEGAL_DOCUMENT_EFFECTIVE_DATE:?LEGAL_DOCUMENT_EFFECTIVE_DATE is required}
+  METRICS_ENABLED: ${METRICS_ENABLED:-true}
+  METRICS_TOKEN: ${METRICS_TOKEN:?METRICS_TOKEN is required}
+  ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL:-}
+  ALERT_WEBHOOK_SECRET: ${ALERT_WEBHOOK_SECRET:-}
+  ALERT_MIN_INTERVAL_SECONDS: ${ALERT_MIN_INTERVAL_SECONDS:-300}
+  JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+  AI_SAFETY_SECRET: ${AI_SAFETY_SECRET:?AI_SAFETY_SECRET is required}
+  PARTNER_ATTRIBUTION_SECRET: ${PARTNER_ATTRIBUTION_SECRET:?PARTNER_ATTRIBUTION_SECRET is required}
+  AI_PROVIDER: ${AI_PROVIDER:?AI_PROVIDER is required}
+  OPENAI_API_KEY: ${OPENAI_API_KEY:?OPENAI_API_KEY is required}
+  OPENAI_MODEL: ${OPENAI_MODEL:-gpt-5.4-mini}
+  OPENAI_INPUT_COST_PER_MILLION: ${OPENAI_INPUT_COST_PER_MILLION:?OPENAI_INPUT_COST_PER_MILLION is required}
+  OPENAI_OUTPUT_COST_PER_MILLION: ${OPENAI_OUTPUT_COST_PER_MILLION:?OPENAI_OUTPUT_COST_PER_MILLION is required}
+  KNOWLEDGE_EMBEDDING_MODEL: ${KNOWLEDGE_EMBEDDING_MODEL:-text-embedding-3-small}
+  KNOWLEDGE_EMBEDDING_DIMENSIONS: ${KNOWLEDGE_EMBEDDING_DIMENSIONS:-256}
+  BILLING_PROVIDER: ${BILLING_PROVIDER:-disabled}
+  STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+  STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+  STRIPE_PRICE_PRO_MONTHLY: ${STRIPE_PRICE_PRO_MONTHLY:-}
+  BILLING_SUCCESS_URL: ${BILLING_SUCCESS_URL:-https://example.com/?billing=success}
+  BILLING_CANCEL_URL: ${BILLING_CANCEL_URL:-https://example.com/?billing=cancelled}
+  PARTNER_COMMERCE_ENABLED: ${PARTNER_COMMERCE_ENABLED:-false}
+  B2B_INVOICING_ENABLED: ${B2B_INVOICING_ENABLED:-false}
+  B2B_INVOICE_ISSUER_NAME: ${B2B_INVOICE_ISSUER_NAME:-}
+  B2B_INVOICE_ISSUER_REGISTRATION_NUMBER: ${B2B_INVOICE_ISSUER_REGISTRATION_NUMBER:-}
+  B2B_INVOICE_ISSUER_VAT_NUMBER: ${B2B_INVOICE_ISSUER_VAT_NUMBER:-}
+  B2B_INVOICE_ISSUER_ADDRESS: ${B2B_INVOICE_ISSUER_ADDRESS:-}
+  B2B_INVOICE_ISSUER_EMAIL: ${B2B_INVOICE_ISSUER_EMAIL:-}
+  B2B_INVOICE_BANK_NAME: ${B2B_INVOICE_BANK_NAME:-}
+  B2B_INVOICE_IBAN: ${B2B_INVOICE_IBAN:-}
+  B2B_INVOICE_SWIFT: ${B2B_INVOICE_SWIFT:-}
+  TELEGRAM_ENABLED: ${TELEGRAM_ENABLED:-false}
+  TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+  TELEGRAM_WEBHOOK_SECRET: ${TELEGRAM_WEBHOOK_SECRET:-}
+  TELEGRAM_BOT_USERNAME: ${TELEGRAM_BOT_USERNAME:-}
+  DIAGNOSIS_EXECUTION_MODE: celery
+  CELERY_BROKER_URL: redis://redis:6379/0
+  CELERY_RESULT_BACKEND: redis://redis:6379/1
+
+x-default-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+services:
+  migrate:
+    build: .
+    command: ["alembic", "upgrade", "head"]
+    environment: *runtime-environment
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+    mem_limit: 512m
+    cpus: 1.0
+    logging: *default-logging
+
+  api:
+    build: .
+    environment: *runtime-environment
+    expose:
+      - "8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    mem_limit: 768m
+    cpus: 1.5
+    logging: *default-logging
+
+  proxy:
+    image: caddy:2.10-alpine
+    environment:
+      PUBLIC_DOMAIN: ${PUBLIC_DOMAIN:?PUBLIC_DOMAIN is required}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    mem_limit: 256m
+    cpus: 0.5
+    logging: *default-logging
+
+  worker:
+    build: .
+    command: ["celery", "-A", "app.tasks.celery_app", "worker", "--loglevel=INFO", "--concurrency=2"]
+    environment: *runtime-environment
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    mem_limit: 1536m
+    cpus: 2.0
+    logging: *default-logging
+
+  beat:
+    build: .
+    command: ["celery", "-A", "app.tasks.celery_app", "beat", "--loglevel=INFO", "--schedule=/tmp/celerybeat-schedule"]
+    environment: *runtime-environment
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    mem_limit: 256m
+    cpus: 0.5
+    logging: *default-logging
+
+  db:
+    image: pgvector/pgvector:0.8.2-pg17
+    environment:
+      POSTGRES_DB: gardener
+      POSTGRES_USER: gardener
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gardener -d gardener"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    mem_limit: 1024m
+    cpus: 2.0
+    logging: *default-logging
+
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    mem_limit: 512m
+    cpus: 1.0
+    logging: *default-logging
+
+volumes:
+  postgres_data:
+  redis_data:
+  caddy_data:
+  caddy_config:

@@ -1,0 +1,12 @@
+{
+  "name": "ai-garden-e2e",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "test:e2e": "playwright test"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "4.12.1",
+    "@playwright/test": "1.61.1"
+  }
+}

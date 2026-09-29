@@ -1,0 +1,538 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Безопасная AI-диагностика растений">
+  <title>AI Garden — диагностика растений</title>
+  <link rel="stylesheet" href="/static/styles.css?v=20260923">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="AI Garden">
+      <span class="brand-mark" aria-hidden="true">✦</span>
+      <span>AI Garden</span>
+    </a>
+    <div class="topbar-actions">
+      <label class="language-picker" aria-label="Язык">
+        <select id="languageSelect">
+          <option value="ru">RU</option>
+          <option value="lv">LV</option>
+          <option value="en">EN</option>
+        </select>
+      </label>
+      <span id="providerBadge" class="badge hidden"></span>
+      <button id="demoLoginButton" class="button primary hidden" type="button">Демо-вход</button>
+      <button id="dashboardSettingsButton" class="button ghost hidden" type="button">Настроить дашборд</button>
+      <button id="telegramButton" class="button ghost hidden" type="button">Telegram</button>
+      <button id="billingButton" class="button ghost hidden" type="button">Подписка</button>
+      <button id="partnerButton" class="button ghost hidden" type="button">Кабинет партнёра</button>
+      <button id="adminButton" class="button ghost hidden" type="button">Администрирование</button>
+      <button id="logoutButton" class="button ghost hidden" type="button">Выйти</button>
+    </div>
+  </header>
+
+  <main>
+    <section id="authView" class="auth-shell">
+      <div class="hero-copy">
+        <p class="eyebrow">Садовый помощник</p>
+        <h1>Разберитесь, что происходит с растением</h1>
+        <p class="lead">Загрузите фотографии, опишите симптомы и получите осторожную предварительную оценку с уточняющими вопросами.</p>
+        <ul class="feature-list">
+          <li>Фотографии очищаются от EXIF и GPS</li>
+          <li>AI умеет отказаться при плохом снимке</li>
+          <li>История и ответы сохраняются для растения</li>
+        </ul>
+      </div>
+
+      <div class="auth-card card">
+        <div class="segmented" role="tablist" aria-label="Авторизация">
+          <button class="segment active" id="loginTab" type="button" role="tab" aria-selected="true" aria-controls="loginForm">Вход</button>
+          <button class="segment" id="registerTab" type="button" role="tab" aria-selected="false" aria-controls="registerForm" tabindex="-1">Регистрация</button>
+        </div>
+        <form id="loginForm" class="form-stack" role="tabpanel" aria-labelledby="loginTab">
+          <label>Email<input name="email" type="email" autocomplete="email" required></label>
+          <label>Пароль<input name="password" type="password" autocomplete="current-password" minlength="8" required></label>
+          <button class="button primary" type="submit">Войти</button>
+          <button class="button ghost" id="showPasswordReset" type="button">Забыли пароль?</button>
+        </form>
+        <form id="registerForm" class="form-stack hidden" role="tabpanel" aria-labelledby="registerTab">
+          <label>Имя<input name="name" autocomplete="name" minlength="2" required></label>
+          <label>Email<input name="email" type="email" autocomplete="email" required></label>
+          <label>Пароль<input name="password" type="password" autocomplete="new-password" minlength="8" required></label>
+          <label>Регион<input name="region" value="Riga" maxlength="120"></label>
+          <button class="button primary" type="submit">Создать аккаунт</button>
+        </form>
+        <form id="passwordResetRequestForm" class="form-stack hidden">
+          <h2>Восстановление пароля</h2>
+          <p class="muted">Мы отправим одноразовую ссылку, если аккаунт существует.</p>
+          <label>Email<input name="email" type="email" autocomplete="email" required></label>
+          <button class="button primary" type="submit">Отправить ссылку</button>
+          <button class="button ghost auth-back" type="button">Вернуться ко входу</button>
+        </form>
+        <form id="passwordResetConfirmForm" class="form-stack hidden">
+          <h2>Новый пароль</h2>
+          <label>Новый пароль<input name="new_password" type="password" autocomplete="new-password" minlength="8" required></label>
+          <button class="button primary" type="submit">Сохранить пароль</button>
+          <button class="button ghost auth-back" type="button">Вернуться ко входу</button>
+        </form>
+        <p id="authError" class="form-message error hidden" role="alert"></p>
+        <p class="privacy-note">Продолжая, вы соглашаетесь с <a href="/terms">условиями использования</a> и <a href="/privacy">условиями обработки фотографий</a>.</p>
+      </div>
+    </section>
+
+    <section id="appView" class="workspace hidden">
+      <aside class="sidebar card">
+        <div>
+          <p class="eyebrow">Рабочая область</p>
+          <h2 id="profileName">Мой сад</h2>
+          <p id="profileMeta" class="muted"></p>
+        </div>
+
+        <div class="section-heading">
+          <h3>Сады</h3>
+          <button id="showGardenForm" class="icon-button" type="button" aria-label="Добавить сад">+</button>
+        </div>
+        <form id="gardenForm" class="compact-form hidden">
+          <input name="name" placeholder="Название сада" maxlength="120" required>
+          <select name="kind">
+            <option value="garden">Сад</option>
+            <option value="greenhouse">Теплица</option>
+            <option value="balcony">Балкон</option>
+            <option value="indoor">Дом</option>
+          </select>
+          <input name="location" placeholder="Город или регион для прогноза" maxlength="160">
+          <button class="button small" type="submit">Сохранить</button>
+        </form>
+        <div id="gardenList" class="nav-list"></div>
+        <div id="gardenActions" class="entity-actions hidden">
+          <button id="editGarden" class="button ghost small-action" type="button">Изменить</button>
+          <button id="deleteGarden" class="button danger small-action" type="button">Удалить</button>
+        </div>
+
+        <div class="section-heading">
+          <h3>Растения</h3>
+          <button id="showPlantForm" class="icon-button" type="button" aria-label="Добавить растение">+</button>
+        </div>
+        <form id="plantForm" class="compact-form hidden">
+          <input name="name" placeholder="Название растения" maxlength="120" required>
+          <input name="species" placeholder="Вид, если известен" maxlength="160">
+          <input name="taxon_id" placeholder="Taxon ID (optional)" maxlength="100" pattern="[a-z0-9][a-z0-9_.:\-]{1,99}">
+          <select name="growing_place">
+            <option value="greenhouse">Теплица</option>
+            <option value="open_ground">Открытый грунт</option>
+            <option value="indoor">Дом</option>
+            <option value="balcony">Балкон</option>
+          </select>
+          <button class="button small" type="submit">Сохранить</button>
+        </form>
+        <div id="plantList" class="nav-list"></div>
+        <button id="showCalendar" class="button calendar-button" type="button">Открыть календарь</button>
+      </aside>
+
+      <section class="content-column">
+        <section id="adminWorkspace" class="admin-workspace hidden">
+          <div class="card admin-header">
+            <div><p class="eyebrow">Система</p><h1>Административная панель</h1></div>
+            <button id="refreshAdmin" class="button ghost" type="button">Обновить</button>
+          </div>
+          <p id="adminStatus" class="muted">Загружаем метрики…</p>
+          <div id="adminMetrics" class="admin-metrics"></div>
+          <section class="card admin-section">
+            <h2>Каталог партнёров</h2>
+            <div class="catalog-admin-grid">
+              <form id="adminPartnerForm" class="compact-form">
+                <strong>Новый партнёр</strong>
+                <input name="name" placeholder="Название" maxlength="160" required>
+                <input name="website_url" type="url" placeholder="https://partner.example" maxlength="500" required>
+                <select name="billing_plan"><option value="free">Free</option><option value="lead">Оплата за лид</option><option value="business">Business</option></select>
+                <input name="monthly_fee_cents" type="number" min="0" max="10000000" value="0" placeholder="Абонплата, центы">
+                <input name="confirmed_lead_price_cents" type="number" min="0" max="1000000" value="0" placeholder="Цена подтверждённого лида, центы">
+                <input name="billing_currency" value="eur" pattern="[a-z]{3}" maxlength="3" aria-label="Валюта ISO 4217">
+                <input name="legal_name" placeholder="Юридическое название для счёта" maxlength="200">
+                <input name="registration_number" placeholder="Регистрационный номер" maxlength="80">
+                <input name="vat_number" placeholder="Номер НДС (если применимо)" maxlength="80">
+                <textarea name="billing_address" rows="2" maxlength="500" placeholder="Юридический адрес для счёта"></textarea>
+                <input name="billing_email" type="email" placeholder="Email бухгалтерии" maxlength="320">
+                <button class="button primary" type="submit">Добавить партнёра</button>
+                <div id="adminPartnersList" class="partner-chip-list"></div>
+              </form>
+              <form id="adminProductForm" class="compact-form">
+                <strong>Новый товар</strong>
+                <select id="adminProductPartner" name="partner_id" required></select>
+                <input name="name" placeholder="Название товара" maxlength="200" required>
+                <input name="sku" placeholder="SKU (optional)" maxlength="100" pattern="[A-Za-z0-9._:\-]+">
+                <select name="category"><option value="tools">Инструменты</option><option value="nutrition">Питание</option><option value="protection">Защита</option><option value="soil">Грунт</option><option value="irrigation">Полив</option><option value="other">Другое</option></select>
+                <input name="product_url" type="url" placeholder="https://partner.example/product" maxlength="500" required>
+                <input name="image_url" type="url" placeholder="HTTPS image URL (optional)" maxlength="500">
+                <input name="price_cents" type="number" min="0" max="100000000" placeholder="Price cents (optional)">
+                <select name="currency"><option value="eur">EUR</option><option value="usd">USD</option><option value="gbp">GBP</option></select>
+                <label><input name="in_stock" type="checkbox" checked> В наличии</label>
+                <input name="regions" placeholder="Регионы через запятую">
+                <textarea name="description" rows="2" maxlength="500" placeholder="Нейтральное описание без лечебных обещаний"></textarea>
+                <button class="button primary" type="submit">Добавить товар</button>
+              </form>
+            </div>
+            <form id="adminPartnerMemberForm" class="compact-form member-form">
+              <strong>Назначить сотрудника партнёра</strong>
+              <select id="adminMemberPartner" name="partner_id" required></select>
+              <input name="email" type="email" placeholder="Email зарегистрированного пользователя" maxlength="320" required>
+              <select name="role"><option value="owner">Владелец</option><option value="editor" selected>Редактор</option><option value="viewer">Наблюдатель</option></select>
+              <button class="button primary" type="submit">Назначить</button>
+            </form>
+            <div id="adminPartnerMembers" class="partner-chip-list"></div>
+            <div class="table-scroll"><table><thead><tr><th>Товар</th><th>Партнёр</th><th>Категория</th><th>Регионы</th><th>Статус</th><th></th></tr></thead><tbody id="adminProducts"></tbody></table></div>
+          </section>
+          <section class="card admin-section">
+            <h2>Реестр регулируемых товаров</h2>
+            <p class="muted">Импортируйте нормализованный снимок только из проверенного официального источника. Полный снимок помечает отсутствующие записи как недействующие.</p>
+            <form id="adminRegistryImportForm" class="compact-form">
+              <select name="source_name" required><option value="vaad">VAAD</option><option value="eu_pesticides">EU Pesticides Database</option><option value="manual_verified">Проверено специалистом</option></select>
+              <input name="source_url" type="url" placeholder="HTTPS-ссылка на источник" maxlength="1000" required>
+              <input name="source_version" placeholder="Версия или дата снимка" maxlength="120" required>
+              <label><input name="complete_snapshot" type="checkbox"> Полный снимок источника</label>
+              <textarea name="records" rows="7" required placeholder="JSON-массив записей"></textarea>
+              <button class="button primary" type="submit">Импортировать реестр</button>
+            </form>
+            <p id="adminRegistryResult" class="muted"></p>
+            <div class="table-scroll"><table><thead><tr><th>Название</th><th>Юрисдикция</th><th>Регистрационный номер</th><th>Действует до</th><th>Статус</th><th>Источник</th></tr></thead><tbody id="adminRegistry"></tbody></table></div>
+            <h3>Правило безопасной рекомендации</h3>
+            <form id="adminRuleForm" class="compact-form member-form">
+              <select id="adminRuleProduct" name="product_id" required></select>
+              <select id="adminRuleRegistry" name="registry_entry_id"><option value="">Без записи реестра</option></select>
+              <input name="crop_name" placeholder="Культура" maxlength="160" required>
+              <input name="plant_taxon_id" placeholder="Taxon ID (optional)" maxlength="100" pattern="[a-z0-9][a-z0-9_.:\-]{1,99}">
+              <input name="problem_name" placeholder="Проблема" maxlength="200" required>
+              <input name="problem_code" placeholder="Problem code (optional)" maxlength="80" pattern="[a-z0-9][a-z0-9_.\-]{1,79}">
+              <input name="safe_action" placeholder="Безопасное действие" maxlength="500" required>
+              <input name="region_code" placeholder="Код региона" maxlength="20" required>
+              <input name="country_code" placeholder="Country ISO (optional)" maxlength="2" pattern="[A-Za-z]{2}">
+              <label><input name="expert_verified" type="checkbox"> Проверено специалистом</label>
+              <button class="button primary" type="submit">Добавить правило</button>
+            </form>
+            <div class="table-scroll"><table><thead><tr><th>Товар ID</th><th>Культура</th><th>Taxon ID</th><th>Проблема</th><th>Problem code</th><th>Регион</th><th>Country ISO</th><th>Реестр ID</th><th>Проверено</th></tr></thead><tbody id="adminRules"></tbody></table></div>
+          </section>
+          <section class="card admin-section">
+            <h2>Центр уведомлений</h2>
+            <div id="notificationList" class="timeline-list"><p class="muted">Загружаем уведомления…</p></div>
+          </section>
+          <section class="card admin-section">
+            <h2>Пользователи</h2>
+            <div class="table-scroll"><table><thead><tr><th>Email</th><th>Имя</th><th>Регион</th><th>Сады</th><th>Растения</th><th>Диагностики</th></tr></thead><tbody id="adminUsers"></tbody></table></div>
+          </section>
+          <section class="card admin-section">
+            <h2>Фоновые задания</h2>
+            <div class="table-scroll"><table><thead><tr><th>ID</th><th>Статус</th><th>Попытки</th><th>Пользователь</th><th>Ошибка</th><th>Создано</th></tr></thead><tbody id="adminJobs"></tbody></table></div>
+          </section>
+          <section class="card admin-section">
+            <h2>Технический AI-аудит</h2>
+            <p class="muted">Без фотографий, симптомов и полного результата диагностики.</p>
+            <div class="table-scroll"><table><thead><tr><th>Request ID</th><th>Модель</th><th>Статус</th><th>Токены</th><th>Время</th><th>Стоимость</th></tr></thead><tbody id="adminRequests"></tbody></table></div>
+          </section>
+          <section class="card admin-section">
+            <h2>Лиды партнёров</h2>
+            <p class="muted">Продажа становится оплачиваемой только после проверки администратором.</p>
+            <div class="table-scroll"><table><thead><tr><th>Товар</th><th>Партнёр</th><th>Источник</th><th>Статус</th><th>Сумма</th><th>Дата</th><th></th></tr></thead><tbody id="adminLeads"></tbody></table></div>
+          </section>
+          <section class="card admin-section">
+            <h2>Счета партнёрам</h2>
+            <form id="adminInvoiceForm" class="compact-form member-form">
+              <select id="adminInvoicePartner" name="partner_id" required></select>
+              <label>Начало периода<input name="period_start" type="date" required></label>
+              <label>Конец периода (не включительно)<input name="period_end" type="date" required></label>
+              <input name="due_days" type="number" min="1" max="90" value="14" aria-label="Срок оплаты, дней">
+              <button class="button primary" type="submit">Сформировать счёт</button>
+            </form>
+            <div class="table-scroll"><table><thead><tr><th>Номер</th><th>Партнёр ID</th><th>Период</th><th>Конверсии</th><th>Итого</th><th>Статус</th><th></th></tr></thead><tbody id="adminInvoices"></tbody></table></div>
+            <h3>Сверка банковских операций</h3>
+            <form id="adminPaymentImportForm" class="compact-form">
+              <input name="source" value="bank-export" maxlength="60" pattern="[A-Za-z0-9_.\-]+" aria-label="Источник банковской выгрузки" required>
+              <textarea name="records" rows="6" required placeholder='JSON-массив: external_id, booking_date, amount_cents, currency, reference'></textarea>
+              <button class="button primary" type="submit">Импортировать операции</button>
+            </form>
+            <p id="adminPaymentImportResult" class="muted"></p>
+            <div class="table-scroll"><table><thead><tr><th>Операция</th><th>Дата</th><th>Сумма</th><th>Назначение</th><th>Статус</th><th></th></tr></thead><tbody id="adminPayments"></tbody></table></div>
+          </section>
+        </section>
+
+        <section id="partnerWorkspace" class="admin-workspace hidden">
+          <div class="card admin-header">
+            <div><p class="eyebrow">Организация</p><h1 id="partnerTitle">Кабинет партнёра</h1></div>
+            <button id="refreshPartner" class="button ghost" type="button">Обновить</button>
+          </div>
+          <p id="partnerStatus" class="muted"></p>
+          <div id="partnerMetrics" class="admin-metrics"></div>
+          <section class="card admin-section">
+            <h2>Товары организации</h2>
+            <form id="partnerProductForm" class="compact-form product-partner-form">
+              <input name="name" placeholder="Название товара" maxlength="200" required>
+              <input name="sku" placeholder="SKU (optional)" maxlength="100" pattern="[A-Za-z0-9._:\-]+">
+              <select name="category"><option value="tools">Инструменты</option><option value="nutrition">Питание</option><option value="protection">Защита</option><option value="soil">Грунт</option><option value="irrigation">Полив</option><option value="other">Другое</option></select>
+              <input name="product_url" type="url" placeholder="https://partner.example/product" maxlength="500" required>
+              <input name="image_url" type="url" placeholder="HTTPS image URL (optional)" maxlength="500">
+              <input name="price_cents" type="number" min="0" max="100000000" placeholder="Price cents (optional)">
+              <select name="currency"><option value="eur">EUR</option><option value="usd">USD</option><option value="gbp">GBP</option></select>
+              <label><input name="in_stock" type="checkbox" checked> В наличии</label>
+              <input name="regions" placeholder="Регионы через запятую">
+              <textarea name="description" rows="2" maxlength="500" placeholder="Нейтральное описание без лечебных обещаний"></textarea>
+              <button class="button primary" type="submit">Добавить товар</button>
+            </form>
+            <form id="partnerCsvImportForm" class="compact-form member-form">
+              <input name="file" type="file" accept=".csv,text/csv" aria-label="CSV-файл каталога" required>
+              <button class="button ghost" type="submit">Импорт CSV</button>
+            </form>
+            <div class="table-scroll"><table><thead><tr><th>Товар</th><th>Категория</th><th>Регионы</th><th>Статус</th><th></th></tr></thead><tbody id="partnerProducts"></tbody></table></div>
+          </section>
+          <section class="card admin-section">
+            <h2>Переходы и конверсии</h2>
+            <p class="muted">Без email, ID пользователя, диагностики, симптомов и фотографий. Заявленная продажа проверяется администратором.</p>
+            <div class="table-scroll"><table><thead><tr><th>Товар</th><th>Источник</th><th>Статус</th><th>Продажа</th><th>Дата</th><th></th></tr></thead><tbody id="partnerLeads"></tbody></table></div>
+          </section>
+          <section class="card admin-section">
+            <h2>Счета организации</h2>
+            <div class="table-scroll"><table><thead><tr><th>Номер</th><th>Период</th><th>Конверсии</th><th>Итого</th><th>Срок оплаты</th><th>Статус</th><th></th></tr></thead><tbody id="partnerInvoices"></tbody></table></div>
+          </section>
+        </section>
+
+        <section id="billingWorkspace" class="admin-workspace hidden">
+          <div class="card admin-header">
+            <div><p class="eyebrow">Тариф</p><h1>Подписка AI Garden</h1></div>
+            <button id="refreshBilling" class="button ghost" type="button">Обновить</button>
+          </div>
+          <p id="billingStatus" class="muted"></p>
+          <div id="billingPlans" class="billing-plans"></div>
+          <section class="card admin-section billing-note">
+            <h2>Безопасная оплата</h2>
+            <p>Оплата проходит на защищённой странице Stripe. AI Garden не получает и не хранит номер карты.</p>
+            <button id="manageBilling" class="button ghost hidden" type="button">Управлять подпиской</button>
+          </section>
+          <section class="card admin-section">
+            <h2>Ваши данные</h2>
+            <p>Скачайте полный машиночитаемый экспорт или запросите удаление аккаунта и фотографий.</p>
+            <div class="entity-actions">
+              <button id="exportAccountData" class="button ghost" type="button">Скачать мои данные</button>
+              <button id="deleteAccount" class="button danger" type="button">Удалить аккаунт</button>
+            </div>
+          </section>
+        </section>
+
+        <section id="telegramWorkspace" class="admin-workspace hidden">
+          <div class="card admin-header">
+            <div><p class="eyebrow">Уведомления</p><h1>Telegram-бот</h1></div>
+            <button id="refreshTelegram" class="button ghost" type="button">Обновить</button>
+          </div>
+          <section class="card admin-section telegram-connect">
+            <div>
+              <h2 id="telegramTitle">Подключение Telegram</h2>
+              <p id="telegramStatus" class="muted">Проверяем состояние…</p>
+              <div id="telegramLinkResult" class="telegram-link-result"></div>
+            </div>
+            <div class="entity-actions">
+              <button id="createTelegramLink" class="button primary" type="button">Получить одноразовую ссылку</button>
+              <button id="unlinkTelegram" class="button danger hidden" type="button">Отключить</button>
+            </div>
+          </section>
+          <section class="card admin-section">
+            <h2>Команды бота</h2>
+            <div class="telegram-commands">
+              <code>/plants</code><span>список растений</span>
+              <code>/today</code><span>активные задачи на сегодня</span>
+              <code>/unlink</code><span>отключить Telegram</span>
+              <code>/help</code><span>справка</span>
+            </div>
+            <p class="muted">Бот работает только в личном чате. Одноразовая ссылка действует 10 минут.</p>
+          </section>
+        </section>
+
+        <section id="calendarWorkspace" class="calendar-workspace card hidden">
+          <div class="calendar-header">
+            <div><p class="eyebrow">Планирование</p><h1>Календарь сада</h1></div>
+            <form id="calendarRangeForm" class="calendar-range">
+              <label>С<input id="calendarStart" name="start" type="date" required></label>
+              <label>По<input id="calendarEnd" name="end" type="date" required></label>
+              <button class="button primary" type="submit">Показать</button>
+            </form>
+          </div>
+          <p id="calendarStatus" class="muted">Выберите период.</p>
+          <div class="calendar-legend">
+            <span class="legend-care">Уход</span>
+            <span class="legend-reminder">Напоминания</span>
+            <span class="legend-seasonal">Сезонные работы</span>
+            <span class="legend-weather">Погода</span>
+          </div>
+          <div id="calendarList" class="calendar-list"></div>
+        </section>
+
+        <div id="emptyState" class="card empty-state">
+          <span class="empty-icon" aria-hidden="true">⌁</span>
+          <h2>Выберите или добавьте растение</h2>
+          <p>После этого можно загрузить фотографии и начать диагностику.</p>
+        </div>
+
+        <div id="plantWorkspace" class="hidden">
+          <div class="plant-header card">
+            <div>
+              <p class="eyebrow">Растение</p>
+              <h1 id="plantTitle"></h1>
+              <p id="plantDescription" class="muted"></p>
+            </div>
+            <div class="entity-actions">
+              <button id="editPlant" class="button ghost" type="button">Изменить</button>
+              <button id="deletePlant" class="button danger" type="button">Удалить</button>
+              <button id="refreshHistory" class="button ghost" type="button">Обновить историю</button>
+            </div>
+          </div>
+
+          <section id="weatherPanel" class="weather-section card" data-dashboard-widget="weather">
+            <div class="section-heading weather-heading">
+              <div><p class="eyebrow">Погода</p><h2>Прогноз для сада</h2></div>
+              <button id="refreshWeather" class="button ghost" type="button">Обновить прогноз</button>
+            </div>
+            <p id="weatherStatus" class="muted">Загружаем прогноз…</p>
+            <div id="weatherWarnings" class="weather-warnings"></div>
+            <div id="weatherDaily" class="weather-daily"></div>
+            <p class="weather-note">Прогноз ориентировочный. Перед поливом и обработкой проверяйте условия непосредственно в саду.</p>
+          </section>
+
+          <div id="diagnosisGrid" class="diagnosis-grid">
+            <form id="diagnosisForm" class="card diagnosis-form" data-dashboard-widget="diagnosis">
+              <div class="step-label"><span>1</span> Фотографии</div>
+              <label class="dropzone" for="photoInput">
+                <input id="photoInput" name="photos" type="file" accept="image/jpeg,image/png,image/webp" multiple required>
+                <strong>Выберите 1–5 фотографий</strong>
+                <span>Крупный план повреждения, дневной рассеянный свет</span>
+              </label>
+              <div id="photoPreview" class="photo-preview"></div>
+
+              <div class="step-label"><span>2</span> Симптомы</div>
+              <label>Что изменилось и когда?
+                <textarea name="symptoms" rows="5" minlength="10" maxlength="3000" placeholder="Например: нижние листья начали желтеть неделю назад…" required></textarea>
+              </label>
+              <label>Повреждённая часть
+                <select name="damaged_part">
+                  <option value="leaf">Лист</option>
+                  <option value="stem">Стебель</option>
+                  <option value="root">Корень</option>
+                  <option value="fruit">Плод</option>
+                  <option value="flower">Цветок</option>
+                  <option value="whole_plant">Всё растение</option>
+                </select>
+              </label>
+              <button id="diagnoseButton" class="button primary" type="submit">Начать анализ</button>
+              <p id="diagnosisMessage" class="form-message hidden" role="status"></p>
+            </form>
+
+            <div id="resultPanel" class="card result-panel" data-dashboard-widget="result">
+              <div class="result-placeholder">
+                <span aria-hidden="true">◎</span>
+                <h2>Результат появится здесь</h2>
+                <p>AI сначала проверит наличие растения и качество снимков.</p>
+              </div>
+            </div>
+          </div>
+
+          <section id="carePanel" class="care-section card" data-dashboard-widget="care">
+            <div class="section-heading">
+              <div><p class="eyebrow">Уход</p><h2>Журнал растения</h2></div>
+            </div>
+            <form id="careEventForm" class="care-form">
+              <label>Действие
+                <select name="event_type">
+                  <option value="watering">Полив</option>
+                  <option value="fertilizing">Подкормка</option>
+                  <option value="treatment">Обработка</option>
+                  <option value="pruning">Обрезка</option>
+                  <option value="transplanting">Пересадка</option>
+                  <option value="observation">Наблюдение</option>
+                </select>
+              </label>
+              <label>Дата и время<input id="careOccurredAt" name="occurred_at" type="datetime-local" required></label>
+              <label>Количество<input name="amount" type="number" min="0.01" max="1000000" step="any" placeholder="Необязательно"></label>
+              <label>Единица<input name="unit" maxlength="30" placeholder="л, мл, г…"></label>
+              <label>Средство<input name="product" maxlength="160" placeholder="Необязательно"></label>
+              <label class="care-notes">Заметка<textarea name="notes" rows="2" maxlength="2000"></textarea></label>
+              <button class="button primary" type="submit">Добавить запись</button>
+            </form>
+            <div id="careEventList" class="care-list"><p class="muted">Записей ухода пока нет.</p></div>
+          </section>
+
+          <section id="reminderPanel" class="reminder-section card" data-dashboard-widget="reminders">
+            <div class="section-heading">
+              <div><p class="eyebrow">План</p><h2>Напоминания</h2></div>
+            </div>
+            <form id="reminderForm" class="reminder-form">
+              <label>Тип
+                <select name="kind">
+                  <option value="watering">Полив</option>
+                  <option value="fertilizing">Подкормка</option>
+                  <option value="treatment">Обработка</option>
+                  <option value="pruning">Обрезка</option>
+                  <option value="transplanting">Пересадка</option>
+                  <option value="inspection">Осмотр</option>
+                  <option value="other">Другое</option>
+                </select>
+              </label>
+              <label>Задача<input name="title" maxlength="160" placeholder="Например, проверить влажность" required></label>
+              <label>Когда<input id="reminderDueAt" name="due_at" type="datetime-local" required></label>
+              <label>Повторение
+                <select name="recurrence">
+                  <option value="">Не повторять</option>
+                  <option value="daily">Каждый день</option>
+                  <option value="weekly">Каждую неделю</option>
+                  <option value="monthly">Каждый месяц</option>
+                </select>
+              </label>
+              <label>Канал
+                <select name="preferred_channel">
+                  <option value="web">В приложении</option>
+                  <option value="telegram">Telegram</option>
+                  <option value="both">Приложение и Telegram</option>
+                </select>
+              </label>
+              <label>Заметка<input name="notes" maxlength="2000" placeholder="Необязательно"></label>
+              <button class="button primary" type="submit">Запланировать</button>
+            </form>
+            <div id="reminderList" class="reminder-list"><p class="muted">Активных напоминаний пока нет.</p></div>
+          </section>
+
+          <section id="historyPanel" class="history-section card" data-dashboard-widget="history">
+            <div class="section-heading">
+              <div><p class="eyebrow">Хронология</p><h2>История диагностики</h2></div>
+            </div>
+            <div id="historyList" class="history-list"><p class="muted">Диагностик пока нет.</p></div>
+          </section>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <div id="dashboardSettingsModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="dashboardSettingsTitle">
+    <section class="card dashboard-settings-panel">
+      <div class="section-heading dashboard-settings-heading">
+        <div>
+          <p class="eyebrow">Настройки</p>
+          <h2 id="dashboardSettingsTitle">Окна дашборда</h2>
+        </div>
+        <button id="closeDashboardSettings" class="icon-button" type="button" aria-label="Закрыть">×</button>
+      </div>
+      <p class="muted">Отметьте блоки, которые хотите видеть в карточке растения.</p>
+      <form id="dashboardSettingsForm" class="dashboard-settings-form">
+        <label><input type="checkbox" value="weather"> Погода и предупреждения</label>
+        <label><input type="checkbox" value="diagnosis"> Новая диагностика</label>
+        <label><input type="checkbox" value="result"> Результат диагностики</label>
+        <label><input type="checkbox" value="care"> Журнал ухода</label>
+        <label><input type="checkbox" value="reminders"> Напоминания</label>
+        <label><input type="checkbox" value="history"> История диагностики</label>
+      </form>
+      <div class="dashboard-settings-actions">
+        <button id="showAllDashboardWidgets" class="button ghost" type="button">Показать все</button>
+        <button id="saveDashboardSettings" class="button primary" type="button">Готово</button>
+      </div>
+    </section>
+  </div>
+
+  <div id="toast" class="toast hidden" role="alert"></div>
+  <script src="/static/i18n.js?v=20260918" defer></script>
+  <script src="/static/app.js?v=20260923" defer></script>
+</body>
+</html>

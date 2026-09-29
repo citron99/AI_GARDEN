@@ -1,0 +1,17 @@
+services:
+  migrate:
+    environment:
+      PARTNER_COMMERCE_ENABLED: "false"
+      B2B_INVOICING_ENABLED: "false"
+  api:
+    environment:
+      PARTNER_COMMERCE_ENABLED: "false"
+      B2B_INVOICING_ENABLED: "false"
+  worker:
+    environment:
+      PARTNER_COMMERCE_ENABLED: "false"
+      B2B_INVOICING_ENABLED: "false"
+  beat:
+    environment:
+      PARTNER_COMMERCE_ENABLED: "false"
+      B2B_INVOICING_ENABLED: "false"
