@@ -16,7 +16,11 @@ class WeatherServiceError(RuntimeError):
 
 class WeatherService:
     GEOCODING_URL = "https://geocoding-api.open-meteo.com/v1/search"
-    FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
+    # резервный хост: у api.open-meteo.com бывает недоступен маршрут (ConnectTimeout)
+    FORECAST_URLS = (
+        "https://api.open-meteo.com/v1/forecast",
+        "https://historical-forecast-api.open-meteo.com/v1/forecast",
+    )
     DAILY_FIELDS = (
         "weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum,"
         "precipitation_probability_max,snowfall_sum,wind_speed_10m_max,"
@@ -67,18 +71,25 @@ class WeatherService:
         return place
 
     def _forecast(self, place: dict) -> WeatherForecastRead:
-        response = self._client.get(
-            self.FORECAST_URL,
-            params={
-                "latitude": place["latitude"],
-                "longitude": place["longitude"],
-                "daily": self.DAILY_FIELDS,
-                "timezone": "auto",
-                "forecast_days": settings.weather_forecast_days,
-            },
-        )
-        response.raise_for_status()
-        payload = response.json()
+        params = {
+            "latitude": place["latitude"],
+            "longitude": place["longitude"],
+            "daily": self.DAILY_FIELDS,
+            "timezone": "auto",
+            "forecast_days": settings.weather_forecast_days,
+        }
+        payload: dict | None = None
+        last_error: httpx.HTTPError = httpx.TransportError("Погодный сервис недоступен")
+        for url in self.FORECAST_URLS:
+            try:
+                response = self._client.get(url, params=params)
+                response.raise_for_status()
+                payload = response.json()
+                break
+            except (httpx.TransportError, httpx.HTTPStatusError) as exc:
+                last_error = exc
+        if payload is None:
+            raise last_error
         daily_payload = payload.get("daily") or {}
         times = daily_payload.get("time") or []
         if not times:
