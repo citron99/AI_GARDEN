@@ -158,3 +158,4 @@ def test_backups_are_excluded_and_ci_audits_both_locks():
     workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
     assert "pip-audit -r requirements.lock" in workflow
     assert "pip-audit -r requirements-dev.lock" in workflow
+    assert "ruff check app tests migrations evals scripts" in workflow

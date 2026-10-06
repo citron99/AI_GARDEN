@@ -86,6 +86,7 @@ from app.schemas import (
     DiagnosisFeedbackCreate,
     DiagnosisFeedbackRead,
     DiagnosisJobRead,
+    DiagnosisQualityReportRead,
     DiagnosisQuestionRead,
     DiagnosisRead,
     EmailVerificationRequest,
@@ -126,6 +127,7 @@ from app.services.account_security_service import (
 from app.services.alert_service import dispatch_operational_alert
 from app.services.billing_service import BillingProviderError, cancel_stripe_subscription
 from app.services.diagnosis_job_service import is_fallback_response
+from app.services.diagnosis_quality_service import build_diagnosis_quality_report
 from app.services.image_service import (
     ImageValidationError,
     SanitizedImage,
@@ -159,6 +161,13 @@ web_dir = Path(__file__).resolve().parents[1] / "web"
 logger = logging.getLogger(__name__)
 
 
+def _secure_transport_enabled() -> bool:
+    return (
+        settings.environment.lower() == "production"
+        or settings.public_base_url.lower().startswith("https://")
+    )
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     validate_runtime_settings()
@@ -182,8 +191,14 @@ app.include_router(telegram_router)
 @app.exception_handler(HTTPException)
 async def localized_http_exception(request: Request, exc: HTTPException) -> JSONResponse:
     language = normalize_language(request.headers.get("accept-language"))
-    detail = translate_http_error(exc.detail, language, exc.status_code) if isinstance(exc.detail, str) else exc.detail
-    return JSONResponse(status_code=exc.status_code, content={"detail": detail}, headers=exc.headers)
+    detail = (
+        translate_http_error(exc.detail, language, exc.status_code)
+        if isinstance(exc.detail, str)
+        else exc.detail
+    )
+    return JSONResponse(
+        status_code=exc.status_code, content={"detail": detail}, headers=exc.headers
+    )
 
 
 _BODY_TOO_LARGE_DETAIL = "Тело запроса слишком большое"
@@ -281,7 +296,7 @@ async def security_headers(request, call_next):
         "img-src 'self' blob: data:; connect-src 'self'; font-src 'self'; "
         "object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
     )
-    if settings.environment.lower() == "production":
+    if _secure_transport_enabled():
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     return response
 
@@ -309,6 +324,12 @@ def b2b_terms_page() -> FileResponse:
 @app.get("/api/v1/public/privacy-config")
 def privacy_config() -> dict:
     """Publish non-secret controller and retention details used by legal pages."""
+    ai_provider = settings.ai_provider.strip().lower()
+    ai_labels = {
+        "openai": "OpenAI",
+        "gemini": "Google Gemini",
+        "deepseek": "DeepSeek",
+    }
     return {
         "controller_name": settings.data_controller_name,
         "contact_email": settings.privacy_contact_email,
@@ -322,7 +343,12 @@ def privacy_config() -> dict:
         },
         "unattached_photo_retention_hours": settings.unattached_photo_retention_hours,
         "processors": {
-            "ai": "OpenAI" if settings.ai_provider == "openai" else None,
+            "ai": ai_labels.get(ai_provider),
+            "ai_fallback": (
+                "DeepSeek"
+                if settings.deepseek_api_key and ai_provider in {"openai", "gemini"}
+                else None
+            ),
             "payments": "Stripe" if settings.billing_provider == "stripe" else None,
             "messaging": "Telegram" if settings.telegram_enabled else None,
             "weather": "Open-Meteo",
@@ -336,7 +362,9 @@ def health() -> dict[str, str | bool]:
         "status": "ok",
         "ai_provider": settings.ai_provider,
         "demo_mode": ai_gateway.demo_mode,
-        "demo_login_enabled": settings.environment.lower() != "production",
+        "demo_login_enabled": (
+            settings.demo_login_enabled and settings.environment.lower() != "production"
+        ),
         "diagnosis_execution_mode": settings.diagnosis_execution_mode,
         "partner_commerce_enabled": settings.partner_commerce_enabled,
         "b2b_invoicing_enabled": settings.b2b_invoicing_enabled,
@@ -366,15 +394,21 @@ def readiness() -> dict:
         checks["migrations"] = "ok"
     except Exception as exc:
         logger.exception("readiness database check failed")
-        dispatch_operational_alert("readiness_failed", details={"check": "database", "error_type": type(exc).__name__})
-        raise HTTPException(503, {"status": "not_ready", "check": "database", "error": str(exc)[:200]}) from exc
+        dispatch_operational_alert(
+            "readiness_failed", details={"check": "database", "error_type": type(exc).__name__}
+        )
+        raise HTTPException(
+            503, {"status": "not_ready", "check": "database", "error": str(exc)[:200]}
+        ) from exc
     if settings.diagnosis_execution_mode == "celery":
         try:
             from redis import Redis
 
             from app.tasks import celery_app
 
-            Redis.from_url(settings.celery_broker_url, socket_connect_timeout=1, socket_timeout=1).ping()
+            Redis.from_url(
+                settings.celery_broker_url, socket_connect_timeout=1, socket_timeout=1
+            ).ping()
             checks["redis"] = "ok"
             workers = celery_app.control.inspect(timeout=1).ping() or {}
             if not workers:
@@ -382,8 +416,12 @@ def readiness() -> dict:
             checks["worker"] = "ok"
         except Exception as exc:
             logger.exception("readiness queue check failed")
-            dispatch_operational_alert("readiness_failed", details={"check": "queue", "error_type": type(exc).__name__})
-            raise HTTPException(503, {"status": "not_ready", "check": "queue", "error": str(exc)[:200]}) from exc
+            dispatch_operational_alert(
+                "readiness_failed", details={"check": "queue", "error_type": type(exc).__name__}
+            )
+            raise HTTPException(
+                503, {"status": "not_ready", "check": "queue", "error": str(exc)[:200]}
+            ) from exc
     return {"status": "ready", "checks": checks}
 
 
@@ -397,20 +435,36 @@ def metrics(request: Request, db: Session = Depends(get_db)) -> Response:
         if not hmac.compare_digest(authorization, expected):
             raise HTTPException(401, "Metrics authentication required")
     gauges = {
-        "diagnosis_jobs_queued": db.scalar(select(func.count(DiagnosisJob.id)).where(
-            DiagnosisJob.status == "queued")) or 0,
-        "diagnosis_jobs_running": db.scalar(select(func.count(DiagnosisJob.id)).where(
-            DiagnosisJob.status == "running")) or 0,
-        "diagnosis_jobs_failed": db.scalar(select(func.count(DiagnosisJob.id)).where(
-            DiagnosisJob.status == "failed")) or 0,
-        "ai_requests_failed": db.scalar(select(func.count(AIRequestLog.id)).where(
-            AIRequestLog.success.is_(False))) or 0,
-        "notifications_pending": db.scalar(select(func.count(UserNotification.id)).where(
-            UserNotification.read_at.is_(None))) or 0,
-        "partner_conversions_pending": db.scalar(select(func.count(ProductLead.id)).where(
-            ProductLead.status == "conversion_claimed")) or 0,
-        "partner_invoices_outstanding_cents": db.scalar(select(func.coalesce(func.sum(PartnerInvoice.total_cents), 0)).where(
-            PartnerInvoice.status == "issued")) or 0,
+        "diagnosis_jobs_queued": db.scalar(
+            select(func.count(DiagnosisJob.id)).where(DiagnosisJob.status == "queued")
+        )
+        or 0,
+        "diagnosis_jobs_running": db.scalar(
+            select(func.count(DiagnosisJob.id)).where(DiagnosisJob.status == "running")
+        )
+        or 0,
+        "diagnosis_jobs_failed": db.scalar(
+            select(func.count(DiagnosisJob.id)).where(DiagnosisJob.status == "failed")
+        )
+        or 0,
+        "ai_requests_failed": db.scalar(
+            select(func.count(AIRequestLog.id)).where(AIRequestLog.success.is_(False))
+        )
+        or 0,
+        "notifications_pending": db.scalar(
+            select(func.count(UserNotification.id)).where(UserNotification.read_at.is_(None))
+        )
+        or 0,
+        "partner_conversions_pending": db.scalar(
+            select(func.count(ProductLead.id)).where(ProductLead.status == "conversion_claimed")
+        )
+        or 0,
+        "partner_invoices_outstanding_cents": db.scalar(
+            select(func.coalesce(func.sum(PartnerInvoice.total_cents), 0)).where(
+                PartnerInvoice.status == "issued"
+            )
+        )
+        or 0,
     }
     return Response(render_metrics(gauges), media_type="text/plain; version=0.0.4; charset=utf-8")
 
@@ -421,7 +475,7 @@ def _set_refresh_cookie(response: Response, refresh_token: str) -> None:
         refresh_token,
         max_age=settings.refresh_token_expire_days * 86400,
         httponly=True,
-        secure=settings.environment == "production",
+        secure=_secure_transport_enabled(),
         samesite="lax",
         path="/api/v1/auth",
     )
@@ -435,12 +489,19 @@ def register(
     db: Session = Depends(get_db),
 ) -> TokenRead:
     email = payload.email.strip().lower()
-    enforce_auth_rate_limit("register", f"{request.client.host if request.client else 'unknown'}:{email}")
+    enforce_auth_rate_limit(
+        "register", f"{request.client.host if request.client else 'unknown'}:{email}"
+    )
     if db.scalar(select(User.id).where(func.lower(User.email) == email)):
         raise HTTPException(409, "Пользователь с таким email уже зарегистрирован")
-    user = User(email=email, name=payload.name, password_hash=hash_password(payload.password),
-                language=payload.language, region=payload.region,
-                email_verified_at=(datetime.now(UTC) if settings.environment == "test" else None))
+    user = User(
+        email=email,
+        name=payload.name,
+        password_hash=hash_password(payload.password),
+        language=payload.language,
+        region=payload.region,
+        email_verified_at=(datetime.now(UTC) if settings.environment == "test" else None),
+    )
     db.add(user)
     try:
         db.commit()
@@ -469,7 +530,9 @@ def login(
     response: Response,
     db: Session = Depends(get_db),
 ) -> TokenRead:
-    enforce_auth_rate_limit("login", f"{request.client.host if request.client else 'unknown'}:{payload.email}")
+    enforce_auth_rate_limit(
+        "login", f"{request.client.host if request.client else 'unknown'}:{payload.email}"
+    )
     user = db.scalar(select(User).where(func.lower(User.email) == payload.email.strip().lower()))
     if not user or user.is_blocked or not verify_password(payload.password, user.password_hash):
         raise HTTPException(401, "Неверный email или пароль")
@@ -489,7 +552,7 @@ def demo_login(
     response: Response,
     db: Session = Depends(get_db),
 ) -> TokenRead:
-    if settings.environment.lower() == "production":
+    if not settings.demo_login_enabled or settings.environment.lower() == "production":
         raise HTTPException(404, "Демонстрационный вход недоступен")
     client_host = request.client.host if request.client else "unknown"
     enforce_auth_rate_limit("login", f"{client_host}:{DEMO_USER_EMAIL}")
@@ -510,12 +573,14 @@ def demo_login(
         garden = Garden(user_id=user.id, name="Демо-сад", kind="garden", location="Дом")
         db.add(garden)
         db.flush()
-        db.add(Plant(
-            garden_id=garden.id,
-            name="Фикус Бенджамина",
-            species="Ficus benjamina",
-            growing_place="indoor",
-        ))
+        db.add(
+            Plant(
+                garden_id=garden.id,
+                name="Фикус Бенджамина",
+                species="Ficus benjamina",
+                growing_place="indoor",
+            )
+        )
         db.commit()
         db.refresh(user)
     pair = create_token_pair(user, db)
@@ -559,7 +624,9 @@ def request_email_verification(
     request: Request,
     db: Session = Depends(get_db),
 ) -> dict:
-    enforce_auth_rate_limit("verify_email", f"{request.client.host if request.client else 'unknown'}:{payload.email}")
+    enforce_auth_rate_limit(
+        "verify_email", f"{request.client.host if request.client else 'unknown'}:{payload.email}"
+    )
     user = db.scalar(select(User).where(func.lower(User.email) == payload.email.strip().lower()))
     if user and user.email_verified_at is None and not user.is_blocked:
         token = issue_action_token(db, user, "verify_email")
@@ -586,7 +653,9 @@ def request_password_reset(
     request: Request,
     db: Session = Depends(get_db),
 ) -> dict:
-    enforce_auth_rate_limit("password_reset", f"{request.client.host if request.client else 'unknown'}:{payload.email}")
+    enforce_auth_rate_limit(
+        "password_reset", f"{request.client.host if request.client else 'unknown'}:{payload.email}"
+    )
     user = db.scalar(select(User).where(func.lower(User.email) == payload.email.strip().lower()))
     if user and not user.is_blocked:
         token = issue_action_token(db, user, "password_reset")
@@ -603,8 +672,9 @@ def confirm_password_reset(payload: PasswordResetConfirm, db: Session = Depends(
     if not user:
         raise HTTPException(400, "Ссылка восстановления недействительна или устарела")
     user.password_hash = hash_password(payload.new_password)
-    db.query(AuthSession).filter(AuthSession.user_id == user.id, AuthSession.revoked_at.is_(None)).update(
-        {AuthSession.revoked_at: datetime.now(UTC)}, synchronize_session=False)
+    db.query(AuthSession).filter(
+        AuthSession.user_id == user.id, AuthSession.revoked_at.is_(None)
+    ).update({AuthSession.revoked_at: datetime.now(UTC)}, synchronize_session=False)
     db.commit()
     return {"password_reset": True}
 
@@ -628,106 +698,288 @@ def update_current_user(
 
 
 @app.get("/api/v1/users/me/export")
-def export_account_data(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
+def export_account_data(
+    user: User = Depends(get_current_user), db: Session = Depends(get_db)
+) -> dict:
     gardens = list(db.scalars(select(Garden).where(Garden.user_id == user.id).order_by(Garden.id)))
     garden_ids = [item.id for item in gardens]
-    plants = list(db.scalars(select(Plant).where(Plant.garden_id.in_(garden_ids)).order_by(Plant.id))) if garden_ids else []
+    plants = (
+        list(db.scalars(select(Plant).where(Plant.garden_id.in_(garden_ids)).order_by(Plant.id)))
+        if garden_ids
+        else []
+    )
     plant_ids = [item.id for item in plants]
-    diagnoses = list(db.scalars(select(Diagnosis).where(Diagnosis.plant_id.in_(plant_ids)).order_by(Diagnosis.id))) if plant_ids else []
-    care_events = list(db.scalars(select(CareEvent).where(CareEvent.plant_id.in_(plant_ids)).order_by(CareEvent.id))) if plant_ids else []
-    reminders = list(db.scalars(select(Reminder).where(Reminder.plant_id.in_(plant_ids)).order_by(Reminder.id))) if plant_ids else []
-    photos = list(db.scalars(select(PlantPhoto).where(PlantPhoto.plant_id.in_(plant_ids)).order_by(PlantPhoto.id))) if plant_ids else []
+    diagnoses = (
+        list(
+            db.scalars(
+                select(Diagnosis).where(Diagnosis.plant_id.in_(plant_ids)).order_by(Diagnosis.id)
+            )
+        )
+        if plant_ids
+        else []
+    )
+    care_events = (
+        list(
+            db.scalars(
+                select(CareEvent).where(CareEvent.plant_id.in_(plant_ids)).order_by(CareEvent.id)
+            )
+        )
+        if plant_ids
+        else []
+    )
+    reminders = (
+        list(
+            db.scalars(
+                select(Reminder).where(Reminder.plant_id.in_(plant_ids)).order_by(Reminder.id)
+            )
+        )
+        if plant_ids
+        else []
+    )
+    photos = (
+        list(
+            db.scalars(
+                select(PlantPhoto).where(PlantPhoto.plant_id.in_(plant_ids)).order_by(PlantPhoto.id)
+            )
+        )
+        if plant_ids
+        else []
+    )
     diagnosis_ids = [item.id for item in diagnoses]
-    revisions = list(db.scalars(select(DiagnosisRevision).where(
-        DiagnosisRevision.diagnosis_id.in_(diagnosis_ids)).order_by(DiagnosisRevision.id))) if diagnosis_ids else []
-    questions = list(db.scalars(select(DiagnosisQuestion).where(
-        DiagnosisQuestion.diagnosis_id.in_(diagnosis_ids)).order_by(DiagnosisQuestion.id))) if diagnosis_ids else []
+    revisions = (
+        list(
+            db.scalars(
+                select(DiagnosisRevision)
+                .where(DiagnosisRevision.diagnosis_id.in_(diagnosis_ids))
+                .order_by(DiagnosisRevision.id)
+            )
+        )
+        if diagnosis_ids
+        else []
+    )
+    questions = (
+        list(
+            db.scalars(
+                select(DiagnosisQuestion)
+                .where(DiagnosisQuestion.diagnosis_id.in_(diagnosis_ids))
+                .order_by(DiagnosisQuestion.id)
+            )
+        )
+        if diagnosis_ids
+        else []
+    )
     question_ids = [item.id for item in questions]
-    answers = list(db.scalars(select(DiagnosisAnswer).where(
-        DiagnosisAnswer.question_id.in_(question_ids)).order_by(DiagnosisAnswer.id))) if question_ids else []
-    feedback = list(db.scalars(select(DiagnosisFeedback).where(
-        DiagnosisFeedback.user_id == user.id).order_by(DiagnosisFeedback.id)))
-    notifications = list(db.scalars(select(UserNotification).where(
-        UserNotification.user_id == user.id).order_by(UserNotification.id)))
-    ai_requests = list(db.scalars(select(AIRequestLog).where(
-        AIRequestLog.user_id == user.id).order_by(AIRequestLog.id)))
-    diagnosis_jobs = list(db.scalars(select(DiagnosisJob).where(
-        DiagnosisJob.user_id == user.id).order_by(DiagnosisJob.created_at)))
-    auth_sessions = list(db.scalars(select(AuthSession).where(
-        AuthSession.user_id == user.id).order_by(AuthSession.created_at)))
+    answers = (
+        list(
+            db.scalars(
+                select(DiagnosisAnswer)
+                .where(DiagnosisAnswer.question_id.in_(question_ids))
+                .order_by(DiagnosisAnswer.id)
+            )
+        )
+        if question_ids
+        else []
+    )
+    feedback = list(
+        db.scalars(
+            select(DiagnosisFeedback)
+            .where(DiagnosisFeedback.user_id == user.id)
+            .order_by(DiagnosisFeedback.id)
+        )
+    )
+    notifications = list(
+        db.scalars(
+            select(UserNotification)
+            .where(UserNotification.user_id == user.id)
+            .order_by(UserNotification.id)
+        )
+    )
+    ai_requests = list(
+        db.scalars(
+            select(AIRequestLog).where(AIRequestLog.user_id == user.id).order_by(AIRequestLog.id)
+        )
+    )
+    diagnosis_jobs = list(
+        db.scalars(
+            select(DiagnosisJob)
+            .where(DiagnosisJob.user_id == user.id)
+            .order_by(DiagnosisJob.created_at)
+        )
+    )
+    auth_sessions = list(
+        db.scalars(
+            select(AuthSession)
+            .where(AuthSession.user_id == user.id)
+            .order_by(AuthSession.created_at)
+        )
+    )
     subscription = db.scalar(select(Subscription).where(Subscription.user_id == user.id))
     telegram_account = db.scalar(select(TelegramAccount).where(TelegramAccount.user_id == user.id))
-    telegram_updates = list(db.scalars(select(TelegramUpdate).where(
-        TelegramUpdate.chat_id == telegram_account.chat_id).order_by(TelegramUpdate.id)
-    )) if telegram_account else []
-    commercial_interactions = list(db.scalars(
-        select(ProductLead).where(ProductLead.user_id == user.id).order_by(ProductLead.id)
-    ))
+    telegram_updates = (
+        list(
+            db.scalars(
+                select(TelegramUpdate)
+                .where(TelegramUpdate.chat_id == telegram_account.chat_id)
+                .order_by(TelegramUpdate.id)
+            )
+        )
+        if telegram_account
+        else []
+    )
+    commercial_interactions = list(
+        db.scalars(
+            select(ProductLead).where(ProductLead.user_id == user.id).order_by(ProductLead.id)
+        )
+    )
     return {
         "exported_at": datetime.now(UTC),
-        "user": {"id": user.id, "email": user.email, "name": user.name, "language": user.language,
-                 "region": user.region, "created_at": user.created_at},
-        "gardens": [{column.name: getattr(item, column.name) for column in Garden.__table__.columns
-                      if column.name != "user_id"} for item in gardens],
-        "plants": [{column.name: getattr(item, column.name) for column in Plant.__table__.columns} for item in plants],
-        "diagnoses": [{"id": item.id, "plant_id": item.plant_id, "symptoms": item.symptoms,
-                        "damaged_part": item.damaged_part, "result": item.result,
-                        "model_name": item.model_name, "prompt_version": item.prompt_version,
-                        "created_at": item.created_at} for item in diagnoses],
+        "user": {
+            "id": user.id,
+            "email": user.email,
+            "name": user.name,
+            "language": user.language,
+            "region": user.region,
+            "created_at": user.created_at,
+        },
+        "gardens": [
+            {
+                column.name: getattr(item, column.name)
+                for column in Garden.__table__.columns
+                if column.name != "user_id"
+            }
+            for item in gardens
+        ],
+        "plants": [
+            {column.name: getattr(item, column.name) for column in Plant.__table__.columns}
+            for item in plants
+        ],
+        "diagnoses": [
+            {
+                "id": item.id,
+                "plant_id": item.plant_id,
+                "symptoms": item.symptoms,
+                "damaged_part": item.damaged_part,
+                "result": item.result,
+                "model_name": item.model_name,
+                "prompt_version": item.prompt_version,
+                "created_at": item.created_at,
+            }
+            for item in diagnoses
+        ],
         "diagnosis_revisions": [
-            {column.name: getattr(item, column.name) for column in DiagnosisRevision.__table__.columns}
+            {
+                column.name: getattr(item, column.name)
+                for column in DiagnosisRevision.__table__.columns
+            }
             for item in revisions
         ],
         "diagnosis_questions": [
-            {column.name: getattr(item, column.name) for column in DiagnosisQuestion.__table__.columns}
+            {
+                column.name: getattr(item, column.name)
+                for column in DiagnosisQuestion.__table__.columns
+            }
             for item in questions
         ],
         "diagnosis_answers": [
-            {column.name: getattr(item, column.name) for column in DiagnosisAnswer.__table__.columns}
+            {
+                column.name: getattr(item, column.name)
+                for column in DiagnosisAnswer.__table__.columns
+            }
             for item in answers
         ],
         "diagnosis_feedback": [
-            {column.name: getattr(item, column.name) for column in DiagnosisFeedback.__table__.columns
-             if column.name != "user_id"}
+            {
+                column.name: getattr(item, column.name)
+                for column in DiagnosisFeedback.__table__.columns
+                if column.name != "user_id"
+            }
             for item in feedback
         ],
-        "care_events": [{column.name: getattr(item, column.name) for column in CareEvent.__table__.columns} for item in care_events],
-        "reminders": [{column.name: getattr(item, column.name) for column in Reminder.__table__.columns} for item in reminders],
-        "photos": [{"id": item.id, "plant_id": item.plant_id, "content_type": item.content_type,
-                    "created_at": item.created_at, "download_url": f"/api/v1/photos/{item.id}"} for item in photos],
-        "commercial_interactions": [{
-            "id": item.id, "product_id": item.product_id, "diagnosis_id": item.diagnosis_id,
-            "source": item.source, "status": item.status, "partner_reference": item.partner_reference,
-            "conversion_value_cents": item.conversion_value_cents, "claimed_at": item.claimed_at,
-            "confirmed_at": item.confirmed_at, "created_at": item.created_at,
-        } for item in commercial_interactions],
+        "care_events": [
+            {column.name: getattr(item, column.name) for column in CareEvent.__table__.columns}
+            for item in care_events
+        ],
+        "reminders": [
+            {column.name: getattr(item, column.name) for column in Reminder.__table__.columns}
+            for item in reminders
+        ],
+        "photos": [
+            {
+                "id": item.id,
+                "plant_id": item.plant_id,
+                "content_type": item.content_type,
+                "created_at": item.created_at,
+                "download_url": f"/api/v1/photos/{item.id}",
+            }
+            for item in photos
+        ],
+        "commercial_interactions": [
+            {
+                "id": item.id,
+                "product_id": item.product_id,
+                "diagnosis_id": item.diagnosis_id,
+                "source": item.source,
+                "status": item.status,
+                "partner_reference": item.partner_reference,
+                "conversion_value_cents": item.conversion_value_cents,
+                "claimed_at": item.claimed_at,
+                "confirmed_at": item.confirmed_at,
+                "created_at": item.created_at,
+            }
+            for item in commercial_interactions
+        ],
         "notifications": [
-            {column.name: getattr(item, column.name) for column in UserNotification.__table__.columns
-             if column.name != "user_id"}
+            {
+                column.name: getattr(item, column.name)
+                for column in UserNotification.__table__.columns
+                if column.name != "user_id"
+            }
             for item in notifications
         ],
         "ai_request_logs": [
-            {column.name: getattr(item, column.name) for column in AIRequestLog.__table__.columns
-             if column.name != "user_id"}
+            {
+                column.name: getattr(item, column.name)
+                for column in AIRequestLog.__table__.columns
+                if column.name != "user_id"
+            }
             for item in ai_requests
         ],
         "diagnosis_jobs": [
-            {column.name: getattr(item, column.name) for column in DiagnosisJob.__table__.columns
-             if column.name not in {"user_id", "execution_token", "celery_task_id"}}
+            {
+                column.name: getattr(item, column.name)
+                for column in DiagnosisJob.__table__.columns
+                if column.name not in {"user_id", "execution_token", "celery_task_id"}
+            }
             for item in diagnosis_jobs
         ],
-        "auth_sessions": [{
-            "id": item.id, "expires_at": item.expires_at, "revoked_at": item.revoked_at,
-            "created_at": item.created_at, "last_used_at": item.last_used_at,
-        } for item in auth_sessions],
-        "subscription": ({
-            column.name: getattr(subscription, column.name)
-            for column in Subscription.__table__.columns if column.name != "user_id"
-        } if subscription else None),
-        "telegram_account": ({
-            column.name: getattr(telegram_account, column.name)
-            for column in TelegramAccount.__table__.columns if column.name != "user_id"
-        } if telegram_account else None),
+        "auth_sessions": [
+            {
+                "id": item.id,
+                "expires_at": item.expires_at,
+                "revoked_at": item.revoked_at,
+                "created_at": item.created_at,
+                "last_used_at": item.last_used_at,
+            }
+            for item in auth_sessions
+        ],
+        "subscription": (
+            {
+                column.name: getattr(subscription, column.name)
+                for column in Subscription.__table__.columns
+                if column.name != "user_id"
+            }
+            if subscription
+            else None
+        ),
+        "telegram_account": (
+            {
+                column.name: getattr(telegram_account, column.name)
+                for column in TelegramAccount.__table__.columns
+                if column.name != "user_id"
+            }
+            if telegram_account
+            else None
+        ),
         "telegram_updates": [
             {column.name: getattr(item, column.name) for column in TelegramUpdate.__table__.columns}
             for item in telegram_updates
@@ -751,7 +1003,9 @@ def delete_account(
         and subscription.status not in {"canceled", "incomplete_expired"}
     ):
         deletion_request = stage_account_deletion(
-            db, user, subscription.provider_subscription_id,
+            db,
+            user,
+            subscription.provider_subscription_id,
         )
         mark_cancellation_requested(db, deletion_request)
         try:
@@ -766,9 +1020,9 @@ def delete_account(
             "status": "awaiting_subscription_cancellation",
             "account_blocked": True,
         }
-    photos_to_delete = list(db.scalars(
-        select(PlantPhoto).join(Plant).join(Garden).where(Garden.user_id == user.id)
-    ))
+    photos_to_delete = list(
+        db.scalars(select(PlantPhoto).join(Plant).join(Garden).where(Garden.user_id == user.id))
+    )
     enqueue_photo_deletions(db, photos_to_delete)
     db.delete(user)
     db.commit()
@@ -790,15 +1044,18 @@ def set_user_blocked(
         raise HTTPException(409, "Администратор не может заблокировать собственную учётную запись")
     target.is_blocked = blocked
     if blocked:
-        db.query(AuthSession).filter(AuthSession.user_id == target.id, AuthSession.revoked_at.is_(None)).update(
-            {AuthSession.revoked_at: datetime.now(UTC)}, synchronize_session=False)
-    db.add(AdminAuditLog(
-        admin_user_id=admin.id,
-        action="user.block" if blocked else "user.unblock",
-        target_type="user",
-        target_id=str(target.id),
-        details={"email": target.email},
-    ))
+        db.query(AuthSession).filter(
+            AuthSession.user_id == target.id, AuthSession.revoked_at.is_(None)
+        ).update({AuthSession.revoked_at: datetime.now(UTC)}, synchronize_session=False)
+    db.add(
+        AdminAuditLog(
+            admin_user_id=admin.id,
+            action="user.block" if blocked else "user.unblock",
+            target_type="user",
+            target_id=str(target.id),
+            details={"email": target.email},
+        )
+    )
     db.commit()
     return {"user_id": target.id, "blocked": target.is_blocked}
 
@@ -814,24 +1071,52 @@ def admin_overview(
         "gardens": db.scalar(select(func.count(Garden.id))) or 0,
         "plants": db.scalar(select(func.count(Plant.id))) or 0,
         "diagnoses": db.scalar(select(func.count(Diagnosis.id))) or 0,
-        "jobs_queued": db.scalar(select(func.count(DiagnosisJob.id)).where(DiagnosisJob.status == "queued")) or 0,
-        "jobs_running": db.scalar(select(func.count(DiagnosisJob.id)).where(DiagnosisJob.status == "running")) or 0,
-        "jobs_failed": db.scalar(select(func.count(DiagnosisJob.id)).where(DiagnosisJob.status == "failed")) or 0,
-        "ai_requests_successful": db.scalar(select(func.count(AIRequestLog.id)).where(AIRequestLog.success.is_(True))) or 0,
-        "ai_requests_failed": db.scalar(select(func.count(AIRequestLog.id)).where(AIRequestLog.success.is_(False))) or 0,
-        "input_tokens": db.scalar(select(func.coalesce(func.sum(AIRequestLog.input_tokens), 0))) or 0,
-        "output_tokens": db.scalar(select(func.coalesce(func.sum(AIRequestLog.output_tokens), 0))) or 0,
-        "estimated_cost": float(db.scalar(select(func.coalesce(func.sum(AIRequestLog.estimated_cost), 0))) or 0),
+        "jobs_queued": db.scalar(
+            select(func.count(DiagnosisJob.id)).where(DiagnosisJob.status == "queued")
+        )
+        or 0,
+        "jobs_running": db.scalar(
+            select(func.count(DiagnosisJob.id)).where(DiagnosisJob.status == "running")
+        )
+        or 0,
+        "jobs_failed": db.scalar(
+            select(func.count(DiagnosisJob.id)).where(DiagnosisJob.status == "failed")
+        )
+        or 0,
+        "ai_requests_successful": db.scalar(
+            select(func.count(AIRequestLog.id)).where(AIRequestLog.success.is_(True))
+        )
+        or 0,
+        "ai_requests_failed": db.scalar(
+            select(func.count(AIRequestLog.id)).where(AIRequestLog.success.is_(False))
+        )
+        or 0,
+        "input_tokens": db.scalar(select(func.coalesce(func.sum(AIRequestLog.input_tokens), 0)))
+        or 0,
+        "output_tokens": db.scalar(select(func.coalesce(func.sum(AIRequestLog.output_tokens), 0)))
+        or 0,
+        "estimated_cost": float(
+            db.scalar(select(func.coalesce(func.sum(AIRequestLog.estimated_cost), 0))) or 0
+        ),
         "average_feedback_rating": float(average_rating) if average_rating is not None else None,
         "partners": db.scalar(select(func.count(Partner.id)).where(Partner.active.is_(True))) or 0,
-        "active_products": db.scalar(select(func.count(Product.id)).where(Product.active.is_(True))) or 0,
+        "active_products": db.scalar(select(func.count(Product.id)).where(Product.active.is_(True)))
+        or 0,
         "product_leads": db.scalar(select(func.count(ProductLead.id))) or 0,
-        "pending_partner_conversions": db.scalar(select(func.count(ProductLead.id)).where(
-            ProductLead.status == "conversion_claimed")) or 0,
-        "confirmed_partner_conversions": db.scalar(select(func.count(ProductLead.id)).where(
-            ProductLead.status == "confirmed")) or 0,
-        "partner_invoices_issued_cents": db.scalar(select(func.coalesce(func.sum(PartnerInvoice.total_cents), 0)).where(
-            PartnerInvoice.status.in_(("issued", "paid")))) or 0,
+        "pending_partner_conversions": db.scalar(
+            select(func.count(ProductLead.id)).where(ProductLead.status == "conversion_claimed")
+        )
+        or 0,
+        "confirmed_partner_conversions": db.scalar(
+            select(func.count(ProductLead.id)).where(ProductLead.status == "confirmed")
+        )
+        or 0,
+        "partner_invoices_issued_cents": db.scalar(
+            select(func.coalesce(func.sum(PartnerInvoice.total_cents), 0)).where(
+                PartnerInvoice.status.in_(("issued", "paid"))
+            )
+        )
+        or 0,
     }
 
 
@@ -842,13 +1127,26 @@ def admin_users(
     _admin: User = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ) -> list[dict]:
-    garden_count = select(func.count(Garden.id)).where(Garden.user_id == User.id).correlate(User).scalar_subquery()
+    garden_count = (
+        select(func.count(Garden.id))
+        .where(Garden.user_id == User.id)
+        .correlate(User)
+        .scalar_subquery()
+    )
     plant_count = (
-        select(func.count(Plant.id)).join(Garden).where(Garden.user_id == User.id).correlate(User).scalar_subquery()
+        select(func.count(Plant.id))
+        .join(Garden)
+        .where(Garden.user_id == User.id)
+        .correlate(User)
+        .scalar_subquery()
     )
     diagnosis_count = (
-        select(func.count(Diagnosis.id)).join(Plant).join(Garden)
-        .where(Garden.user_id == User.id).correlate(User).scalar_subquery()
+        select(func.count(Diagnosis.id))
+        .join(Plant)
+        .join(Garden)
+        .where(Garden.user_id == User.id)
+        .correlate(User)
+        .scalar_subquery()
     )
     rows = db.execute(
         select(User, garden_count, plant_count, diagnosis_count)
@@ -856,17 +1154,20 @@ def admin_users(
         .offset(offset)
         .limit(limit)
     ).all()
-    return [{
-        "id": user.id,
-        "email": user.email,
-        "name": user.name,
-        "region": user.region,
-        "is_admin": user.is_admin,
-        "created_at": user.created_at,
-        "gardens_count": gardens,
-        "plants_count": plants,
-        "diagnoses_count": diagnoses,
-    } for user, gardens, plants, diagnoses in rows]
+    return [
+        {
+            "id": user.id,
+            "email": user.email,
+            "name": user.name,
+            "region": user.region,
+            "is_admin": user.is_admin,
+            "created_at": user.created_at,
+            "gardens_count": gardens,
+            "plants_count": plants,
+            "diagnoses_count": diagnoses,
+        }
+        for user, gardens, plants, diagnoses in rows
+    ]
 
 
 @app.get("/api/v1/admin/diagnosis-jobs", response_model=list[AdminJobSummaryRead])
@@ -880,19 +1181,24 @@ def admin_diagnosis_jobs(
     query = select(DiagnosisJob)
     if status_filter:
         query = query.where(DiagnosisJob.status == status_filter)
-    jobs = list(db.scalars(query.order_by(DiagnosisJob.created_at.desc()).offset(offset).limit(limit)))
-    return [{
-        "id": job.id,
-        "user_id": job.user_id,
-        "plant_id": job.plant_id,
-        "diagnosis_id": job.diagnosis_id,
-        "status": job.status,
-        "attempts": job.attempts,
-        "error_type": job.error_type,
-        "created_at": job.created_at,
-        "started_at": job.started_at,
-        "completed_at": job.completed_at,
-    } for job in jobs]
+    jobs = list(
+        db.scalars(query.order_by(DiagnosisJob.created_at.desc()).offset(offset).limit(limit))
+    )
+    return [
+        {
+            "id": job.id,
+            "user_id": job.user_id,
+            "plant_id": job.plant_id,
+            "diagnosis_id": job.diagnosis_id,
+            "status": job.status,
+            "attempts": job.attempts,
+            "error_type": job.error_type,
+            "created_at": job.created_at,
+            "started_at": job.started_at,
+            "completed_at": job.completed_at,
+        }
+        for job in jobs
+    ]
 
 
 @app.get("/api/v1/admin/ai-requests", response_model=list[AdminAIRequestRead])
@@ -902,23 +1208,48 @@ def admin_ai_requests(
     _admin: User = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ) -> list[dict]:
-    logs = list(db.scalars(select(AIRequestLog).order_by(AIRequestLog.created_at.desc())
-                           .offset(offset).limit(limit)))
-    return [{
-        "request_id": item.request_id,
-        "diagnosis_id": item.diagnosis_id,
-        "provider": item.provider,
-        "model_name": item.model_name,
-        "prompt_version": item.prompt_version,
-        "success": item.success,
-        "error_type": item.error_type,
-        "http_status": item.http_status,
-        "input_tokens": item.input_tokens,
-        "output_tokens": item.output_tokens,
-        "response_ms": item.response_ms,
-        "estimated_cost": item.estimated_cost,
-        "created_at": item.created_at,
-    } for item in logs]
+    logs = list(
+        db.scalars(
+            select(AIRequestLog)
+            .order_by(AIRequestLog.created_at.desc())
+            .offset(offset)
+            .limit(limit)
+        )
+    )
+    return [
+        {
+            "request_id": item.request_id,
+            "diagnosis_id": item.diagnosis_id,
+            "provider": item.provider,
+            "model_name": item.model_name,
+            "prompt_version": item.prompt_version,
+            "success": item.success,
+            "error_type": item.error_type,
+            "http_status": item.http_status,
+            "input_tokens": item.input_tokens,
+            "output_tokens": item.output_tokens,
+            "response_ms": item.response_ms,
+            "estimated_cost": item.estimated_cost,
+            "created_at": item.created_at,
+        }
+        for item in logs
+    ]
+
+
+@app.get("/api/v1/admin/diagnosis-quality", response_model=DiagnosisQualityReportRead)
+def admin_diagnosis_quality(
+    days: int = Query(default=30, ge=7, le=365),
+    provider: str | None = Query(default=None, min_length=1, max_length=40),
+    prompt_version: str | None = Query(default=None, min_length=1, max_length=80),
+    _admin: User = Depends(get_admin_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    return build_diagnosis_quality_report(
+        db,
+        days=days,
+        provider=provider,
+        prompt_version=prompt_version,
+    )
 
 
 @app.get("/api/v1/admin/audit-logs", response_model=list[AdminAuditLogRead])
@@ -928,8 +1259,14 @@ def admin_audit_logs(
     _admin: User = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ) -> list[AdminAuditLog]:
-    return list(db.scalars(select(AdminAuditLog).order_by(AdminAuditLog.created_at.desc())
-                           .offset(offset).limit(limit)))
+    return list(
+        db.scalars(
+            select(AdminAuditLog)
+            .order_by(AdminAuditLog.created_at.desc())
+            .offset(offset)
+            .limit(limit)
+        )
+    )
 
 
 def _knowledge_admin_read(item: KnowledgeSourceRecord) -> dict:
@@ -963,8 +1300,14 @@ def admin_knowledge_sources(
     _admin: User = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ) -> list[dict]:
-    items = list(db.scalars(select(KnowledgeSourceRecord).order_by(KnowledgeSourceRecord.id)
-                            .offset(offset).limit(limit)))
+    items = list(
+        db.scalars(
+            select(KnowledgeSourceRecord)
+            .order_by(KnowledgeSourceRecord.id)
+            .offset(offset)
+            .limit(limit)
+        )
+    )
     return [_knowledge_admin_read(item) for item in items]
 
 
@@ -1007,7 +1350,9 @@ def admin_sync_knowledge(
 
 
 @app.post("/api/v1/gardens", response_model=GardenRead, status_code=201)
-def create_garden(payload: GardenCreate, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> Garden:
+def create_garden(
+    payload: GardenCreate, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+) -> Garden:
     garden = Garden(user_id=user.id, **payload.model_dump())
     db.add(garden)
     try:
@@ -1026,8 +1371,15 @@ def list_gardens(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> list[Garden]:
-    return list(db.scalars(select(Garden).where(Garden.user_id == user.id)
-                           .order_by(Garden.id.desc()).offset(offset).limit(limit)))
+    return list(
+        db.scalars(
+            select(Garden)
+            .where(Garden.user_id == user.id)
+            .order_by(Garden.id.desc())
+            .offset(offset)
+            .limit(limit)
+        )
+    )
 
 
 def _owned_garden(garden_id: int, user: User, db: Session) -> Garden:
@@ -1067,9 +1419,7 @@ def delete_garden(
     db: Session = Depends(get_db),
 ) -> Response:
     garden = _owned_garden(garden_id, user, db)
-    photos = list(db.scalars(
-        select(PlantPhoto).join(Plant).where(Plant.garden_id == garden.id)
-    ))
+    photos = list(db.scalars(select(PlantPhoto).join(Plant).where(Plant.garden_id == garden.id)))
     _queue_photo_deletions(db, photos)
     db.delete(garden)
     db.commit()
@@ -1094,7 +1444,9 @@ def garden_weather(
 
 
 @app.post("/api/v1/plants", response_model=PlantRead, status_code=status.HTTP_201_CREATED)
-def create_plant(payload: PlantCreate, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> Plant:
+def create_plant(
+    payload: PlantCreate, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+) -> Plant:
     garden = db.get(Garden, payload.garden_id)
     if not garden or garden.user_id != user.id:
         raise HTTPException(404, "Сад не найден")
@@ -1112,13 +1464,25 @@ def list_plants(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> list[Plant]:
-    return list(db.scalars(select(Plant).join(Garden).where(Garden.user_id == user.id)
-                           .order_by(Plant.id.desc()).offset(offset).limit(limit)))
+    return list(
+        db.scalars(
+            select(Plant)
+            .join(Garden)
+            .where(Garden.user_id == user.id)
+            .order_by(Plant.id.desc())
+            .offset(offset)
+            .limit(limit)
+        )
+    )
 
 
 @app.get("/api/v1/plants/{plant_id}", response_model=PlantRead)
-def get_plant(plant_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> Plant:
-    plant = db.scalar(select(Plant).join(Garden).where(Plant.id == plant_id, Garden.user_id == user.id))
+def get_plant(
+    plant_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+) -> Plant:
+    plant = db.scalar(
+        select(Plant).join(Garden).where(Plant.id == plant_id, Garden.user_id == user.id)
+    )
     if not plant:
         raise HTTPException(404, "Растение не найдено")
     return plant
@@ -1194,6 +1558,7 @@ def _next_reminder_occurrence(due_at: datetime, recurrence: str, timezone_name: 
     year = local.year + (1 if local.month == 12 else 0)
     month = 1 if local.month == 12 else local.month + 1
     from calendar import monthrange
+
     day = min(local.day, monthrange(year, month)[1])
     return local.replace(year=year, month=month, day=day).astimezone(UTC)
 
@@ -1231,8 +1596,13 @@ def list_care_events(
         query = query.where(CareEvent.occurred_at >= start)
     if end is not None:
         query = query.where(CareEvent.occurred_at <= end)
-    return list(db.scalars(query.order_by(CareEvent.occurred_at.desc(), CareEvent.id.desc())
-                           .offset(offset).limit(limit)))
+    return list(
+        db.scalars(
+            query.order_by(CareEvent.occurred_at.desc(), CareEvent.id.desc())
+            .offset(offset)
+            .limit(limit)
+        )
+    )
 
 
 @app.patch("/api/v1/care-events/{event_id}", response_model=CareEventRead)
@@ -1299,7 +1669,9 @@ def list_reminders(
     query = select(Reminder).where(Reminder.plant_id == plant_id)
     if not include_completed:
         query = query.where(Reminder.completed_at.is_(None))
-    return list(db.scalars(query.order_by(Reminder.due_at, Reminder.id).offset(offset).limit(limit)))
+    return list(
+        db.scalars(query.order_by(Reminder.due_at, Reminder.id).offset(offset).limit(limit))
+    )
 
 
 @app.patch("/api/v1/reminders/{reminder_id}", response_model=ReminderRead)
@@ -1327,18 +1699,22 @@ def update_reminder(
         was_completed = reminder.completed_at is not None
         reminder.completed_at = datetime.now(UTC) if completed else None
         if completed and not was_completed and reminder.recurrence:
-            db.add(Reminder(
-                plant_id=reminder.plant_id,
-                kind=reminder.kind,
-                title=reminder.title,
-                due_at=_next_reminder_occurrence(
-                    reminder.due_at, reminder.recurrence, reminder.timezone,
-                ),
-                notes=reminder.notes,
-                recurrence=reminder.recurrence,
-                timezone=reminder.timezone,
-                preferred_channel=reminder.preferred_channel,
-            ))
+            db.add(
+                Reminder(
+                    plant_id=reminder.plant_id,
+                    kind=reminder.kind,
+                    title=reminder.title,
+                    due_at=_next_reminder_occurrence(
+                        reminder.due_at,
+                        reminder.recurrence,
+                        reminder.timezone,
+                    ),
+                    notes=reminder.notes,
+                    recurrence=reminder.recurrence,
+                    timezone=reminder.timezone,
+                    preferred_channel=reminder.preferred_channel,
+                )
+            )
     db.commit()
     db.refresh(reminder)
     return reminder
@@ -1364,7 +1740,12 @@ def calendar_items(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> list[dict]:
-    if start.tzinfo is None or start.utcoffset() is None or end.tzinfo is None or end.utcoffset() is None:
+    if (
+        start.tzinfo is None
+        or start.utcoffset() is None
+        or end.tzinfo is None
+        or end.utcoffset() is None
+    ):
         raise HTTPException(422, "Период календаря должен включать часовой пояс")
     start_utc = start.astimezone(UTC)
     end_utc = end.astimezone(UTC)
@@ -1383,7 +1764,11 @@ def calendar_items(
         select(CareEvent, Plant.name)
         .join(Plant)
         .join(Garden)
-        .where(Garden.user_id == user.id, CareEvent.occurred_at >= start_utc, CareEvent.occurred_at < end_utc)
+        .where(
+            Garden.user_id == user.id,
+            CareEvent.occurred_at >= start_utc,
+            CareEvent.occurred_at < end_utc,
+        )
     ).all()
     items = [
         {
@@ -1398,17 +1783,22 @@ def calendar_items(
         }
         for reminder, plant_name in reminders
     ]
-    items.extend({
-        "item_type": "care_event",
-        "reference_id": event.id,
-        "plant_id": event.plant_id,
-        "plant_name": plant_name,
-        "event_type": event.event_type,
-        "title": event.notes or event.product or event.event_type,
-        "starts_at": event.occurred_at,
-        "completed": True,
-    } for event, plant_name in care_events)
-    gardens = list(db.scalars(select(Garden).where(Garden.user_id == user.id).order_by(Garden.id).limit(50)))
+    items.extend(
+        {
+            "item_type": "care_event",
+            "reference_id": event.id,
+            "plant_id": event.plant_id,
+            "plant_name": plant_name,
+            "event_type": event.event_type,
+            "title": event.notes or event.product or event.event_type,
+            "starts_at": event.occurred_at,
+            "completed": True,
+        }
+        for event, plant_name in care_events
+    )
+    gardens = list(
+        db.scalars(select(Garden).where(Garden.user_id == user.id).order_by(Garden.id).limit(50))
+    )
     items.extend(seasonal_calendar_items(gardens, user, start_utc, end_utc))
     if include_weather:
         gardens = gardens[:20]
@@ -1429,21 +1819,25 @@ def calendar_items(
             except ZoneInfoNotFoundError:
                 forecast_timezone = UTC
             for warning in forecast.warnings:
-                warning_at = datetime.combine(warning.date, datetime_time(hour=9), tzinfo=forecast_timezone)
+                warning_at = datetime.combine(
+                    warning.date, datetime_time(hour=9), tzinfo=forecast_timezone
+                )
                 warning_utc = warning_at.astimezone(UTC)
                 if start_utc <= warning_utc < end_utc:
-                    items.append({
-                        "item_type": "weather_warning",
-                        "reference_id": f"weather:{garden.id}:{warning.date}:{warning.kind}",
-                        "garden_id": garden.id,
-                        "garden_name": garden.name,
-                        "event_type": warning.kind,
-                        "title": warning.title,
-                        "severity": warning.severity,
-                        "description": warning.advice,
-                        "starts_at": warning_at,
-                        "completed": False,
-                    })
+                    items.append(
+                        {
+                            "item_type": "weather_warning",
+                            "reference_id": f"weather:{garden.id}:{warning.date}:{warning.kind}",
+                            "garden_id": garden.id,
+                            "garden_name": garden.name,
+                            "event_type": warning.kind,
+                            "title": warning.title,
+                            "severity": warning.severity,
+                            "description": warning.advice,
+                            "starts_at": warning_at,
+                            "completed": False,
+                        }
+                    )
         if attempted and not succeeded:
             raise HTTPException(503, "Погодный сервис временно недоступен")
 
@@ -1467,8 +1861,9 @@ def list_notifications(
     query = select(UserNotification).where(UserNotification.user_id == user.id)
     if unread_only:
         query = query.where(UserNotification.read_at.is_(None))
-    return list(db.scalars(query.order_by(UserNotification.event_at.desc())
-                           .offset(offset).limit(limit)))
+    return list(
+        db.scalars(query.order_by(UserNotification.event_at.desc()).offset(offset).limit(limit))
+    )
 
 
 @app.patch("/api/v1/notifications/{notification_id}/read", response_model=NotificationRead)
@@ -1477,8 +1872,11 @@ def mark_notification_read(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> UserNotification:
-    item = db.scalar(select(UserNotification).where(
-        UserNotification.id == notification_id, UserNotification.user_id == user.id))
+    item = db.scalar(
+        select(UserNotification).where(
+            UserNotification.id == notification_id, UserNotification.user_id == user.id
+        )
+    )
     if not item:
         raise HTTPException(404, "Уведомление не найдено")
     item.read_at = datetime.now(UTC)
@@ -1488,14 +1886,21 @@ def mark_notification_read(
 
 
 @app.post("/api/v1/plants/{plant_id}/photos", response_model=list[PhotoRead], status_code=201)
-async def upload_photos(plant_id: int, files: list[UploadFile] = File(...), user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> list[PlantPhoto]:
+async def upload_photos(
+    plant_id: int,
+    files: list[UploadFile] = File(...),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> list[PlantPhoto]:
     enforce_rate_limit(
         "photo_upload",
         str(user.id),
         limit=settings.upload_rate_limit_attempts,
         window=settings.upload_rate_limit_window_seconds,
     )
-    if not db.scalar(select(Plant.id).join(Garden).where(Plant.id == plant_id, Garden.user_id == user.id)):
+    if not db.scalar(
+        select(Plant.id).join(Garden).where(Plant.id == plant_id, Garden.user_id == user.id)
+    ):
         raise HTTPException(404, "Растение не найдено")
     if not 1 <= len(files) <= 5:
         raise HTTPException(400, "Загрузите от 1 до 5 фотографий")
@@ -1519,10 +1924,15 @@ async def upload_photos(plant_id: int, files: list[UploadFile] = File(...), user
     try:
         for image in prepared:
             storage_key, file_path = store_photo(
-                plant_id, image.content, image.extension, image.content_type)
-            photo = PlantPhoto(plant_id=plant_id, storage_key=storage_key,
-                               file_path=file_path, content_type=image.content_type,
-                               size_bytes=len(image.content))
+                plant_id, image.content, image.extension, image.content_type
+            )
+            photo = PlantPhoto(
+                plant_id=plant_id,
+                storage_key=storage_key,
+                file_path=file_path,
+                content_type=image.content_type,
+                size_bytes=len(image.content),
+            )
             db.add(photo)
             saved.append(photo)
             stored.append(photo)
@@ -1545,21 +1955,34 @@ def _reserve_photo_storage(db: Session, user_id: int, incoming_bytes: int) -> No
     # две загрузки могут вместе превысить квоту (на SQLite блокировка — no-op).
     # skip_locked недопустим: второй запрос должен дождаться первого и пересчитать сумму.
     db.scalar(select(User.id).where(User.id == user_id).with_for_update())
-    used_storage = db.scalar(
-        select(func.coalesce(func.sum(PlantPhoto.size_bytes), 0))
-        .join(Plant).join(Garden).where(Garden.user_id == user_id)
-    ) or 0
+    used_storage = (
+        db.scalar(
+            select(func.coalesce(func.sum(PlantPhoto.size_bytes), 0))
+            .join(Plant)
+            .join(Garden)
+            .where(Garden.user_id == user_id)
+        )
+        or 0
+    )
     quota_bytes = settings.user_storage_quota_mb * 1024 * 1024
     if used_storage + incoming_bytes > quota_bytes:
         raise HTTPException(413, "Квота хранения фотографий исчерпана")
 
 
-def _create_and_dispatch_diagnosis_job(payload: DiagnosisCreate, user: User, db: Session) -> DiagnosisJob:
-    plant = db.scalar(select(Plant).join(Garden).where(Plant.id == payload.plant_id, Garden.user_id == user.id))
+def _create_and_dispatch_diagnosis_job(
+    payload: DiagnosisCreate, user: User, db: Session
+) -> DiagnosisJob:
+    plant = db.scalar(
+        select(Plant).join(Garden).where(Plant.id == payload.plant_id, Garden.user_id == user.id)
+    )
     if not plant:
         raise HTTPException(404, "Растение не найдено")
     photo_ids = set(payload.photo_ids)
-    photos = list(db.scalars(select(PlantPhoto).where(PlantPhoto.plant_id == plant.id, PlantPhoto.id.in_(photo_ids))))
+    photos = list(
+        db.scalars(
+            select(PlantPhoto).where(PlantPhoto.plant_id == plant.id, PlantPhoto.id.in_(photo_ids))
+        )
+    )
     if {photo.id for photo in photos} != photo_ids:
         raise HTTPException(400, "Некоторые фотографии не принадлежат этому растению")
     _enforce_monthly_diagnosis_quota(user, db)
@@ -1589,7 +2012,9 @@ def _create_and_dispatch_diagnosis_job(payload: DiagnosisCreate, user: User, db:
 
 
 @app.post("/api/v1/diagnoses", response_model=DiagnosisJobRead, status_code=202)
-def create_diagnosis(payload: DiagnosisCreate, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> DiagnosisJob:
+def create_diagnosis(
+    payload: DiagnosisCreate, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+) -> DiagnosisJob:
     return _create_and_dispatch_diagnosis_job(payload, user, db)
 
 
@@ -1608,14 +2033,18 @@ def get_diagnosis_job(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> DiagnosisJob:
-    job = db.scalar(select(DiagnosisJob).where(DiagnosisJob.id == job_id, DiagnosisJob.user_id == user.id))
+    job = db.scalar(
+        select(DiagnosisJob).where(DiagnosisJob.id == job_id, DiagnosisJob.user_id == user.id)
+    )
     if not job:
         raise HTTPException(404, "Задание диагностики не найдено")
     return job
 
 
 def _owned_plant(plant_id: int, user: User, db: Session) -> Plant:
-    plant = db.scalar(select(Plant).join(Garden).where(Plant.id == plant_id, Garden.user_id == user.id))
+    plant = db.scalar(
+        select(Plant).join(Garden).where(Plant.id == plant_id, Garden.user_id == user.id)
+    )
     if not plant:
         raise HTTPException(404, "Растение не найдено")
     return plant
@@ -1623,7 +2052,10 @@ def _owned_plant(plant_id: int, user: User, db: Session) -> Plant:
 
 def _owned_diagnosis(diagnosis_id: int, user: User, db: Session) -> Diagnosis:
     diagnosis = db.scalar(
-        select(Diagnosis).join(Plant).join(Garden).where(Diagnosis.id == diagnosis_id, Garden.user_id == user.id)
+        select(Diagnosis)
+        .join(Plant)
+        .join(Garden)
+        .where(Diagnosis.id == diagnosis_id, Garden.user_id == user.id)
     )
     if not diagnosis:
         raise HTTPException(404, "Диагностика не найдена")
@@ -1636,37 +2068,53 @@ def _enforce_monthly_diagnosis_quota(user: User, db: Session) -> None:
     db.execute(select(User.id).where(User.id == user.id).with_for_update()).scalar_one()
     now = datetime.now(UTC)
     month_start = datetime(now.year, now.month, 1, tzinfo=UTC)
-    used = db.scalar(
-        select(func.count(DiagnosisJob.id)).where(
-            DiagnosisJob.user_id == user.id,
-            DiagnosisJob.created_at >= month_start,
-            DiagnosisJob.operation == "create",
+    used = (
+        db.scalar(
+            select(func.count(DiagnosisJob.id)).where(
+                DiagnosisJob.user_id == user.id,
+                DiagnosisJob.created_at >= month_start,
+                DiagnosisJob.operation == "create",
+            )
         )
-    ) or 0
-    subscription = db.scalar(select(Subscription).where(
-        Subscription.user_id == user.id,
-        Subscription.status.in_(("active", "trialing")),
-        or_(Subscription.current_period_end.is_(None), Subscription.current_period_end > now),
-    ))
+        or 0
+    )
+    subscription = db.scalar(
+        select(Subscription).where(
+            Subscription.user_id == user.id,
+            Subscription.status.in_(("active", "trialing")),
+            or_(Subscription.current_period_end.is_(None), Subscription.current_period_end > now),
+        )
+    )
     limit = settings.pro_diagnoses_per_month if subscription else settings.free_diagnoses_per_month
     if used >= limit:
         raise HTTPException(429, "Месячный лимит диагностик исчерпан")
 
 
 def _enforce_reanalysis_quota(diagnosis: Diagnosis, db: Session) -> None:
-    db.execute(select(Diagnosis.id).where(Diagnosis.id == diagnosis.id).with_for_update()).scalar_one()
+    db.execute(
+        select(Diagnosis.id).where(Diagnosis.id == diagnosis.id).with_for_update()
+    ).scalar_one()
     db.refresh(diagnosis)
-    attempts = db.scalar(select(func.count(DiagnosisJob.id)).where(
-        DiagnosisJob.diagnosis_id == diagnosis.id,
-        DiagnosisJob.operation == "reanalyze",
-    )) or 0
+    attempts = (
+        db.scalar(
+            select(func.count(DiagnosisJob.id)).where(
+                DiagnosisJob.diagnosis_id == diagnosis.id,
+                DiagnosisJob.operation == "reanalyze",
+            )
+        )
+        or 0
+    )
     if attempts >= settings.max_reanalyses_per_diagnosis:
         raise HTTPException(429, "Лимит повторных анализов для этой диагностики исчерпан")
-    active_job = db.scalar(select(DiagnosisJob.id).where(
-        DiagnosisJob.diagnosis_id == diagnosis.id,
-        DiagnosisJob.operation == "reanalyze",
-        DiagnosisJob.status.in_(("queued", "running")),
-    ).limit(1))
+    active_job = db.scalar(
+        select(DiagnosisJob.id)
+        .where(
+            DiagnosisJob.diagnosis_id == diagnosis.id,
+            DiagnosisJob.operation == "reanalyze",
+            DiagnosisJob.status.in_(("queued", "running")),
+        )
+        .limit(1)
+    )
     if active_job:
         raise HTTPException(409, "Повторный анализ этой диагностики уже выполняется")
 
@@ -1732,14 +2180,18 @@ _DEGRADED_NOTICES = {
 def _diagnosis_read(diagnosis: Diagnosis, language: str | None = None) -> DiagnosisRead:
     degraded = _is_degraded_response(diagnosis.model_name)
     lang = language if language in _DEGRADED_NOTICES else "ru"
-    return DiagnosisRead.model_validate(diagnosis).model_copy(update={
-        "ai_degraded": degraded,
-        "degraded_notice": _DEGRADED_NOTICES[lang] if degraded else None,
-    })
+    return DiagnosisRead.model_validate(diagnosis).model_copy(
+        update={
+            "ai_degraded": degraded,
+            "degraded_notice": _DEGRADED_NOTICES[lang] if degraded else None,
+        }
+    )
 
 
 @app.get("/api/v1/diagnoses/{diagnosis_id}", response_model=DiagnosisRead)
-def get_diagnosis(diagnosis_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> DiagnosisRead:
+def get_diagnosis(
+    diagnosis_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+) -> DiagnosisRead:
     return _diagnosis_read(_owned_diagnosis(diagnosis_id, user, db), user.language)
 
 
@@ -1752,8 +2204,15 @@ def list_plant_diagnoses(
     db: Session = Depends(get_db),
 ) -> list[DiagnosisRead]:
     _owned_plant(plant_id, user, db)
-    diagnoses = list(db.scalars(select(Diagnosis).where(Diagnosis.plant_id == plant_id)
-                                .order_by(Diagnosis.created_at.desc()).offset(offset).limit(limit)))
+    diagnoses = list(
+        db.scalars(
+            select(Diagnosis)
+            .where(Diagnosis.plant_id == plant_id)
+            .order_by(Diagnosis.created_at.desc())
+            .offset(offset)
+            .limit(limit)
+        )
+    )
     return [_diagnosis_read(diagnosis, user.language) for diagnosis in diagnoses]
 
 
@@ -1766,38 +2225,71 @@ def plant_history(
     db: Session = Depends(get_db),
 ) -> dict:
     plant = _owned_plant(plant_id, user, db)
-    diagnoses = list(db.scalars(select(Diagnosis).where(Diagnosis.plant_id == plant_id)
-                                .order_by(Diagnosis.created_at.desc()).offset(offset).limit(limit)))
+    diagnoses = list(
+        db.scalars(
+            select(Diagnosis)
+            .where(Diagnosis.plant_id == plant_id)
+            .order_by(Diagnosis.created_at.desc())
+            .offset(offset)
+            .limit(limit)
+        )
+    )
     diagnosis_ids = [item.id for item in diagnoses]
-    revisions = list(db.scalars(
-        select(DiagnosisRevision)
-        .where(DiagnosisRevision.diagnosis_id.in_(diagnosis_ids))
-        .order_by(DiagnosisRevision.created_at.desc())
-    )) if diagnosis_ids else []
-    answers = list(db.execute(
-        select(DiagnosisQuestion.diagnosis_id, DiagnosisQuestion.text, DiagnosisAnswer.answer, DiagnosisQuestion.revision_number)
-        .join(DiagnosisAnswer, DiagnosisAnswer.question_id == DiagnosisQuestion.id)
-        .where(DiagnosisQuestion.diagnosis_id.in_(diagnosis_ids))
-        .order_by(DiagnosisQuestion.revision_number, DiagnosisQuestion.position)
-    ).all()) if diagnosis_ids else []
-    care_events = list(db.scalars(
-        select(CareEvent)
-        .where(CareEvent.plant_id == plant_id)
-        .order_by(CareEvent.occurred_at.desc(), CareEvent.id.desc())
-        .limit(200)
-    ))
-    reminders = list(db.scalars(
-        select(Reminder)
-        .where(Reminder.plant_id == plant_id)
-        .order_by(Reminder.due_at, Reminder.id)
-        .limit(200)
-    ))
+    revisions = (
+        list(
+            db.scalars(
+                select(DiagnosisRevision)
+                .where(DiagnosisRevision.diagnosis_id.in_(diagnosis_ids))
+                .order_by(DiagnosisRevision.created_at.desc())
+            )
+        )
+        if diagnosis_ids
+        else []
+    )
+    answers = (
+        list(
+            db.execute(
+                select(
+                    DiagnosisQuestion.diagnosis_id,
+                    DiagnosisQuestion.text,
+                    DiagnosisAnswer.answer,
+                    DiagnosisQuestion.revision_number,
+                )
+                .join(DiagnosisAnswer, DiagnosisAnswer.question_id == DiagnosisQuestion.id)
+                .where(DiagnosisQuestion.diagnosis_id.in_(diagnosis_ids))
+                .order_by(DiagnosisQuestion.revision_number, DiagnosisQuestion.position)
+            ).all()
+        )
+        if diagnosis_ids
+        else []
+    )
+    care_events = list(
+        db.scalars(
+            select(CareEvent)
+            .where(CareEvent.plant_id == plant_id)
+            .order_by(CareEvent.occurred_at.desc(), CareEvent.id.desc())
+            .limit(200)
+        )
+    )
+    reminders = list(
+        db.scalars(
+            select(Reminder)
+            .where(Reminder.plant_id == plant_id)
+            .order_by(Reminder.due_at, Reminder.id)
+            .limit(200)
+        )
+    )
     return {
         "plant": plant,
         "diagnoses": [_diagnosis_read(diagnosis, user.language) for diagnosis in diagnoses],
         "revisions": revisions,
         "answers": [
-            {"diagnosis_id": diagnosis_id, "question": question, "answer": answer, "revision_number": revision_number}
+            {
+                "diagnosis_id": diagnosis_id,
+                "question": question,
+                "answer": answer,
+                "revision_number": revision_number,
+            }
             for diagnosis_id, question, answer, revision_number in answers
         ],
         "care_events": care_events,
@@ -1806,7 +2298,9 @@ def plant_history(
 
 
 @app.get("/api/v1/photos/{photo_id}")
-def get_photo(photo_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> Response:
+def get_photo(
+    photo_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+) -> Response:
     photo = db.scalar(
         select(PlantPhoto)
         .join(Plant)
@@ -1820,7 +2314,9 @@ def get_photo(photo_id: int, user: User = Depends(get_current_user), db: Session
     except StorageError:
         raise HTTPException(404, "Файл фотографии не найден")
     if isinstance(target, str):
-        return RedirectResponse(target, status_code=307, headers={"Cache-Control": "private, no-store"})
+        return RedirectResponse(
+            target, status_code=307, headers={"Cache-Control": "private, no-store"}
+        )
     return FileResponse(
         target,
         media_type=photo.content_type,
@@ -1835,7 +2331,9 @@ def delete_owned_photo(
     db: Session = Depends(get_db),
 ) -> Response:
     photo = db.scalar(
-        select(PlantPhoto).join(Plant).join(Garden)
+        select(PlantPhoto)
+        .join(Plant)
+        .join(Garden)
         .where(PlantPhoto.id == photo_id, Garden.user_id == user.id)
     )
     if not photo:
@@ -1848,28 +2346,44 @@ def delete_owned_photo(
 
 
 @app.get("/api/v1/diagnoses/{diagnosis_id}/questions", response_model=list[DiagnosisQuestionRead])
-def diagnosis_questions(diagnosis_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> list[DiagnosisQuestion]:
+def diagnosis_questions(
+    diagnosis_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+) -> list[DiagnosisQuestion]:
     diagnosis = _owned_diagnosis(diagnosis_id, user, db)
-    return list(db.scalars(
-        select(DiagnosisQuestion)
-        .where(DiagnosisQuestion.diagnosis_id == diagnosis.id, DiagnosisQuestion.revision_number == diagnosis.current_revision)
-        .order_by(DiagnosisQuestion.position)
-    ))
+    return list(
+        db.scalars(
+            select(DiagnosisQuestion)
+            .where(
+                DiagnosisQuestion.diagnosis_id == diagnosis.id,
+                DiagnosisQuestion.revision_number == diagnosis.current_revision,
+            )
+            .order_by(DiagnosisQuestion.position)
+        )
+    )
 
 
-@app.post("/api/v1/diagnoses/{diagnosis_id}/answers", response_model=DiagnosisJobRead, status_code=202)
-def answer_diagnosis_questions(diagnosis_id: int, payload: DiagnosisAnswersCreate, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> DiagnosisJob:
+@app.post(
+    "/api/v1/diagnoses/{diagnosis_id}/answers", response_model=DiagnosisJobRead, status_code=202
+)
+def answer_diagnosis_questions(
+    diagnosis_id: int,
+    payload: DiagnosisAnswersCreate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> DiagnosisJob:
     diagnosis = _owned_diagnosis(diagnosis_id, user, db)
     question_ids = [item.question_id for item in payload.answers]
     if len(question_ids) != len(set(question_ids)):
         raise HTTPException(422, "Один вопрос нельзя передать дважды")
-    questions = list(db.scalars(
-        select(DiagnosisQuestion).where(
-            DiagnosisQuestion.id.in_(question_ids),
-            DiagnosisQuestion.diagnosis_id == diagnosis.id,
-            DiagnosisQuestion.revision_number == diagnosis.current_revision,
+    questions = list(
+        db.scalars(
+            select(DiagnosisQuestion).where(
+                DiagnosisQuestion.id.in_(question_ids),
+                DiagnosisQuestion.diagnosis_id == diagnosis.id,
+                DiagnosisQuestion.revision_number == diagnosis.current_revision,
+            )
         )
-    ))
+    )
     if {question.id for question in questions} != set(question_ids):
         raise HTTPException(400, "Некоторые вопросы не принадлежат текущей версии диагностики")
     by_id = {question.id: question for question in questions}
@@ -1883,33 +2397,48 @@ def answer_diagnosis_questions(diagnosis_id: int, payload: DiagnosisAnswersCreat
     return _queue_reanalysis_job(diagnosis, user, db, reason="answers")
 
 
-@app.post("/api/v1/diagnoses/{diagnosis_id}/reanalyze", response_model=DiagnosisJobRead, status_code=202)
-def reanalyze_diagnosis(diagnosis_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> DiagnosisJob:
+@app.post(
+    "/api/v1/diagnoses/{diagnosis_id}/reanalyze", response_model=DiagnosisJobRead, status_code=202
+)
+def reanalyze_diagnosis(
+    diagnosis_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+) -> DiagnosisJob:
     diagnosis = _owned_diagnosis(diagnosis_id, user, db)
     return _queue_reanalysis_job(diagnosis, user, db, reason="manual")
 
 
 @app.post("/api/v1/diagnoses/{diagnosis_id}/feedback", response_model=DiagnosisFeedbackRead)
-def create_diagnosis_feedback(diagnosis_id: int, payload: DiagnosisFeedbackCreate, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> DiagnosisFeedback:
+def create_diagnosis_feedback(
+    diagnosis_id: int,
+    payload: DiagnosisFeedbackCreate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> DiagnosisFeedback:
     diagnosis = _owned_diagnosis(diagnosis_id, user, db)
-    feedback = db.scalar(select(DiagnosisFeedback).where(
-        DiagnosisFeedback.diagnosis_id == diagnosis.id,
-        DiagnosisFeedback.user_id == user.id,
-    ))
+    feedback = db.scalar(
+        select(DiagnosisFeedback).where(
+            DiagnosisFeedback.diagnosis_id == diagnosis.id,
+            DiagnosisFeedback.user_id == user.id,
+        )
+    )
     if feedback:
         for field, value in payload.model_dump().items():
             setattr(feedback, field, value)
     else:
-        feedback = DiagnosisFeedback(diagnosis_id=diagnosis.id, user_id=user.id, **payload.model_dump())
+        feedback = DiagnosisFeedback(
+            diagnosis_id=diagnosis.id, user_id=user.id, **payload.model_dump()
+        )
         db.add(feedback)
     try:
         db.commit()
     except IntegrityError:
         db.rollback()
-        feedback = db.scalar(select(DiagnosisFeedback).where(
-            DiagnosisFeedback.diagnosis_id == diagnosis.id,
-            DiagnosisFeedback.user_id == user.id,
-        ))
+        feedback = db.scalar(
+            select(DiagnosisFeedback).where(
+                DiagnosisFeedback.diagnosis_id == diagnosis.id,
+                DiagnosisFeedback.user_id == user.id,
+            )
+        )
         if not feedback:
             raise
         for field, value in payload.model_dump().items():

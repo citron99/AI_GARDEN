@@ -14,7 +14,6 @@ from typing import Any
 import boto3
 from sqlalchemy.engine import make_url
 
-
 MANIFEST_SCHEMA_VERSION = 1
 
 
@@ -98,7 +97,11 @@ def create_postgres_backup(
         *_connection_arguments(target),
     ]
     try:
-        subprocess.run(command, check=True, env=_postgres_env(target))
+        subprocess.run(  # noqa: S603 -- operator-selected executable, argv list, no shell
+            command,
+            check=True,
+            env=_postgres_env(target),
+        )
         if not partial_path.is_file() or partial_path.stat().st_size == 0:
             raise RuntimeError("pg_dump did not create a non-empty backup")
         os.replace(partial_path, backup_path)
@@ -168,7 +171,11 @@ def restore_postgres_backup(
         *_connection_arguments(target),
         str(backup_path),
     ]
-    subprocess.run(command, check=True, env=_postgres_env(target))
+    subprocess.run(  # noqa: S603 -- operator-selected executable, argv list, no shell
+        command,
+        check=True,
+        env=_postgres_env(target),
+    )
     return manifest
 
 
@@ -181,7 +188,7 @@ def audit_s3_bucket(client: Any, bucket: str, *, sample_size: int = 10) -> dict[
             passed, detail = validator(response)
             checks[name] = {"passed": bool(passed), "detail": detail}
             return response
-        except Exception as exc:  # boto3 exposes provider-specific exception types
+        except Exception as exc:  # noqa: BLE001 -- audit must record any S3 client failure
             checks[name] = {"passed": False, "detail": type(exc).__name__}
             return None
 
@@ -240,7 +247,7 @@ def audit_s3_bucket(client: Any, bucket: str, *, sample_size: int = 10) -> dict[
             for item in listing.get("Contents", []):
                 client.head_object(Bucket=bucket, Key=item["Key"])
                 sampled_objects += 1
-        except Exception as exc:  # provider-specific errors should remain a structured audit result
+        except Exception as exc:  # noqa: BLE001 -- audit must record any S3 client failure
             metadata_error = type(exc).__name__
     checks["object_metadata"] = {
         "passed": listing is not None and metadata_error is None,

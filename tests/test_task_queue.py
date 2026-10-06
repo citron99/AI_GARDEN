@@ -90,6 +90,9 @@ def test_production_compose_contains_worker_and_persistent_redis():
     assert "environment: *runtime-environment" in compose
     assert "EMAIL_DELIVERY_MODE: smtp" in compose
     assert "STORAGE_BACKEND: s3" in compose
+    assert "OPENAI_API_KEY: ${OPENAI_API_KEY:-}" in compose
+    assert "GEMINI_API_KEY: ${GEMINI_API_KEY:-}" in compose
+    assert "DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}" in compose
     assert "pgvector/pgvector:0.8.2-pg17" in compose
     assert "redis:7.4-alpine" in compose
     assert '"--maxmemory-policy", "noeviction"' in compose

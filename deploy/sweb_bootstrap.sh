@@ -80,6 +80,7 @@ echo "--- data dir / .env ---"
 mkdir -p "$DATA/uploads"
 if [ ! -f "$BASE/.env" ]; then
   "$VENV/bin/python" - <<'PYEOF'
+import os
 import secrets
 base = "/home/c/citron99ra/garden"
 jwt = secrets.token_urlsafe(48)
@@ -87,20 +88,23 @@ safety = secrets.token_urlsafe(48)
 partner = secrets.token_urlsafe(48)
 env = f"""AI_PROVIDER=mock
 ENVIRONMENT=development
+DEMO_LOGIN_ENABLED=false
 DATABASE_URL=sqlite:////home/c/citron99ra/garden/data/gardener.db
 UPLOAD_DIR=/home/c/citron99ra/garden/data/uploads
 STORAGE_BACKEND=local
 JWT_SECRET={jwt}
 AI_SAFETY_SECRET={safety}
 PARTNER_ATTRIBUTION_SECRET={partner}
-PUBLIC_BASE_URL=http://citron99.garden.swtest.ru
+PUBLIC_BASE_URL=https://citron99.garden.swtest.ru
 TRUSTED_HOSTS=citron99.garden.swtest.ru,citron99.garden,127.0.0.1,localhost
 DIAGNOSIS_EXECUTION_MODE=sync
 BILLING_PROVIDER=disabled
 EMAIL_DELIVERY_MODE=log
-METRICS_ENABLED=true
+METRICS_ENABLED=false
 """
-open(base + "/.env", "w").write(env)
+env_path = base + "/.env"
+open(env_path, "w").write(env)
+os.chmod(env_path, 0o600)
 print(".env written")
 PYEOF
 fi

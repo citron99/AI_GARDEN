@@ -524,6 +524,86 @@ function renderAdminOverview(overview) {
   });
 }
 
+function qualityValue(value, suffix = "") {
+  return value === null || value === undefined ? "—" : `${value}${suffix}`;
+}
+
+function renderDiagnosisQuality(report) {
+  byId("qualityScore").replaceChildren(
+    document.createTextNode(report.quality_score), element("small", "", "/100"),
+  );
+  const kpis = byId("qualityKpis");
+  kpis.replaceChildren();
+  [
+    ["Диагностики", report.kpis.diagnoses],
+    ["AI success", qualityValue(report.kpis.ai_success_rate, "%")],
+    ["Fallback", qualityValue(report.kpis.fallback_rate, "%")],
+    ["Helpful", qualityValue(report.kpis.user_helpful_rate, "%")],
+    ["Feedback coverage", qualityValue(report.kpis.feedback_coverage_rate, "%")],
+    ["Cannot analyze", qualityValue(report.kpis.cannot_analyze_rate, "%")],
+    ["Safety corrections", qualityValue(report.kpis.safety_adjustment_rate, "%")],
+    ["P95 latency", qualityValue(report.kpis.latency_p95_ms, " ms")],
+    ["Rating", qualityValue(report.kpis.average_rating, "/5")],
+  ].forEach(([label, value]) => {
+    const item = element("article", "quality-kpi");
+    item.append(element("span", "", label), element("strong", "", value));
+    kpis.append(item);
+  });
+  const signals = byId("qualitySignals");
+  signals.replaceChildren();
+  report.signals.forEach((signal) => {
+    const row = element("article", `quality-signal ${signal.status}`);
+    row.append(element("strong", "", signal.label));
+    row.append(element("span", "", `${qualityValue(signal.actual)} · ${signal.direction === "minimum" ? "минимум" : "максимум"} ${signal.threshold}`));
+    signals.append(row);
+  });
+  const regressions = byId("qualityRegressions");
+  regressions.replaceChildren();
+  report.regressions.forEach((item) => {
+    const row = element("article", `quality-signal ${item.state}`);
+    row.append(element("strong", "", item.metric.replaceAll("_", " ")));
+    row.append(element("span", "", `${qualityValue(item.current)} · Δ ${item.delta === null ? "—" : item.delta}`));
+    regressions.append(row);
+  });
+  const slices = byId("qualitySlices");
+  slices.replaceChildren();
+  report.slices.forEach((slice) => {
+    const row = element("tr");
+    appendCell(row, `${slice.provider} · ${slice.model_name} · ${slice.prompt_version}`);
+    appendCell(row, slice.requests);
+    appendCell(row, `${slice.success_rate}%`);
+    appendCell(row, qualityValue(slice.latency_p95_ms, " ms"));
+    appendCell(row, qualityValue(slice.average_rating, "/5"));
+    appendCell(row, qualityValue(slice.user_helpful_rate, "%"));
+    appendCell(row, Number(slice.estimated_cost).toFixed(4));
+    slices.append(row);
+  });
+  if (!report.slices.length) {
+    const row = element("tr");
+    const cell = element("td", "muted", "Нет данных для выбранного среза");
+    cell.colSpan = 7; row.append(cell); slices.append(row);
+  }
+  const trend = byId("qualityTrend");
+  trend.replaceChildren(element("h3", "", "Динамика по дням"));
+  report.trend.slice(-14).forEach((point) => {
+    const row = element("article", "quality-trend-row");
+    row.append(element("time", "", new Date(`${point.date}T12:00:00`).toLocaleDateString(uiLocale(), { day: "2-digit", month: "short" })));
+    const bar = element("span", "quality-trend-bar");
+    const fill = element("i"); fill.style.width = `${Math.max(2, point.success_rate)}%`; bar.append(fill);
+    row.append(bar, element("strong", "", `${point.success_rate}% · ${point.diagnoses} diag`));
+    trend.append(row);
+  });
+  byId("qualityEvidence").textContent = `Evidence: ${report.evidence.diagnosis_records} diagnoses · ${report.evidence.ai_request_logs} AI logs · ${report.evidence.feedback_records} feedback · ${report.evidence.safety_adjustments} safety adjustments. ${report.evidence.complete ? "Контур данных достаточен для мониторинга." : "Низкое покрытие feedback — выводы ограничены."}`;
+}
+
+function diagnosisQualityPath() {
+  const form = byId("qualityFilterForm");
+  const params = new URLSearchParams({ days: form.elements.days.value });
+  if (form.elements.provider.value.trim()) params.set("provider", form.elements.provider.value.trim());
+  if (form.elements.prompt_version.value.trim()) params.set("prompt_version", form.elements.prompt_version.value.trim());
+  return `/api/v1/admin/diagnosis-quality?${params}`;
+}
+
 function renderAdminUsers(users) {
   const body = byId("adminUsers");
   body.replaceChildren();
@@ -930,11 +1010,12 @@ async function loadAdmin() {
   status.textContent = "Загружаем метрики…";
   status.className = "muted";
   try {
-    const [overview, users, jobs, requests] = await Promise.all([
+    const [overview, users, jobs, requests, quality] = await Promise.all([
       api("/api/v1/admin/overview"),
       api("/api/v1/admin/users?limit=50"),
       api("/api/v1/admin/diagnosis-jobs?limit=50"),
       api("/api/v1/admin/ai-requests?limit=50"),
+      api(diagnosisQualityPath()),
     ]);
     let partners = [];
     let products = [];
@@ -964,6 +1045,7 @@ async function loadAdmin() {
     renderAdminUsers(users);
     renderAdminJobs(jobs);
     renderAdminRequests(requests);
+    renderDiagnosisQuality(quality);
     renderAdminCatalog(partners, products);
     renderAdminLeads(leads);
     renderAdminMembers(partners, members);
@@ -1895,6 +1977,14 @@ byId("logoutButton").addEventListener("click", async () => {
 });
 byId("adminButton").addEventListener("click", showAdminView);
 byId("refreshAdmin").addEventListener("click", loadAdmin);
+byId("qualityFilterForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const button = event.currentTarget.querySelector("button[type='submit']");
+  button.disabled = true;
+  try { renderDiagnosisQuality(await api(diagnosisQualityPath())); }
+  catch (error) { showToast(error.message); }
+  finally { button.disabled = false; }
+});
 byId("partnerButton").addEventListener("click", showPartnerView);
 byId("refreshPartner").addEventListener("click", loadPartner);
 byId("billingButton").addEventListener("click", showBillingView);

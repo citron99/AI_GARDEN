@@ -4,8 +4,19 @@ from sqlalchemy import select
 
 from app.config import settings
 from app.database import SessionLocal
-from app.models import Garden, Plant, PlantPhoto, StorageMigrationRecord, User
+from app.models import (
+    Garden,
+    Plant,
+    PlantPhoto,
+    StorageDeletionOutbox,
+    StorageMigrationRecord,
+    User,
+)
 from app.services.storage_migration_service import migrate_local_photos_to_s3
+from app.services.storage_outbox_service import (
+    enqueue_photo_deletions,
+    process_storage_deletion_outbox,
+)
 
 
 class FakeS3:
@@ -83,3 +94,27 @@ def test_local_photo_migration_is_dry_run_verified_and_idempotent(monkeypatch):
         verified = migrate_local_photos_to_s3(db, verify_only=True, client=fake)
         assert verified["verified"] == 1
         assert verified["ready_to_switch"] is True
+
+        monkeypatch.setattr(settings, "storage_backend", "s3")
+        deleted = []
+        monkeypatch.setattr(
+            "app.services.storage_outbox_service.delete_storage_reference",
+            lambda backend, storage_key, file_path: deleted.append(
+                (backend, storage_key, file_path)
+            ),
+        )
+        assert enqueue_photo_deletions(db, [photo]) == 2
+        db.commit()
+        queued = list(db.scalars(
+            select(StorageDeletionOutbox).order_by(StorageDeletionOutbox.id)
+        ))
+        assert [(item.backend, item.storage_key, item.file_path) for item in queued] == [
+            ("s3", photo.storage_key, None),
+            ("local", None, str(source)),
+        ]
+
+        assert process_storage_deletion_outbox(db) == {"completed": 2, "failed": 0}
+        assert deleted == [
+            ("s3", photo.storage_key, None),
+            ("local", None, str(source)),
+        ]

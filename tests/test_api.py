@@ -124,10 +124,14 @@ def test_demo_login_is_disabled_in_production(client, monkeypatch):
     assert client.post("/api/v1/auth/demo-login").status_code == 404
 
 
+def test_demo_login_can_be_disabled_outside_production(client, monkeypatch):
+    monkeypatch.setattr(settings, "demo_login_enabled", False)
+    assert client.get("/health").json()["demo_login_enabled"] is False
+    assert client.post("/api/v1/auth/demo-login").status_code == 404
+
+
 def test_host_body_limit_and_production_hsts(client, monkeypatch):
-    assert (
-        client.get("/health", headers={"host": "untrusted.example"}).status_code == 400
-    )
+    assert client.get("/health", headers={"host": "untrusted.example"}).status_code == 400
     too_large = client.post(
         "/api/v1/auth/login",
         content=b"{}",
@@ -142,6 +146,12 @@ def test_host_body_limit_and_production_hsts(client, monkeypatch):
     monkeypatch.setattr(settings, "environment", "production")
     response = client.get("/health")
     assert response.headers["strict-transport-security"].startswith("max-age=31536000")
+
+    monkeypatch.setattr(settings, "environment", "staging")
+    monkeypatch.setattr(settings, "public_base_url", "https://staging.example.test")
+    response = client.post("/api/v1/auth/demo-login")
+    assert response.headers["strict-transport-security"].startswith("max-age=31536000")
+    assert response.headers["set-cookie"].lower().find("secure") != -1
 
 
 def test_request_body_limit_applies_to_chunked_bodies_without_content_length(client, monkeypatch):
@@ -177,7 +187,7 @@ def test_chunked_request_body_under_limit_is_processed(client):
     assert response.json()["access_token"]
 
 
-def test_public_privacy_config_exposes_only_public_retention_metadata(client):
+def test_public_privacy_config_exposes_only_public_retention_metadata(client, monkeypatch):
     for path in ("/privacy", "/terms", "/b2b-terms"):
         page = client.get(path)
         assert page.status_code == 200
@@ -191,6 +201,12 @@ def test_public_privacy_config_exposes_only_public_retention_metadata(client):
     serialized = response.text.casefold()
     assert "secret" not in serialized
     assert "api_key" not in serialized
+
+    monkeypatch.setattr(settings, "ai_provider", "gemini")
+    monkeypatch.setattr(settings, "deepseek_api_key", "configured-fallback-key")
+    processors = client.get("/api/v1/public/privacy-config").json()["processors"]
+    assert processors["ai"] == "Google Gemini"
+    assert processors["ai_fallback"] == "DeepSeek"
 
 
 def test_metrics_are_token_protected_and_use_bounded_route_labels(client, monkeypatch):
@@ -228,15 +244,10 @@ def test_profile_language_update_and_localized_errors(client):
     assert updated.json()["language"] == "en"
     assert client.patch("/api/v1/users/me", headers=headers, json={}).status_code == 422
     assert (
-        client.post(
-            "/api/v1/gardens", headers=headers, json={"name": "Dārzs"}
-        ).status_code
-        == 201
+        client.post("/api/v1/gardens", headers=headers, json={"name": "Dārzs"}).status_code == 201
     )
     localized_headers = {**headers, "Accept-Language": "lv-LV,lv;q=0.9"}
-    duplicate = client.post(
-        "/api/v1/gardens", headers=localized_headers, json={"name": "Dārzs"}
-    )
+    duplicate = client.post("/api/v1/gardens", headers=localized_headers, json={"name": "Dārzs"})
     assert duplicate.status_code == 409
     assert duplicate.json()["detail"] == "Dārzs ar šādu nosaukumu jau pastāv"
     bad_login = client.post(
@@ -287,6 +298,7 @@ def test_web_interface_and_security_headers(client):
     assert "/diagnoses/async" in script.text
     assert "/diagnosis-jobs/" in script.text
     assert "/admin/overview" in script.text
+    assert "/admin/diagnosis-quality" in script.text
     assert "/admin/products" in script.text
     assert "/admin/leads" in script.text
     assert "/partner/overview" in script.text
@@ -304,9 +316,7 @@ def test_web_interface_and_security_headers(client):
 def test_create_plant(client):
     plant, headers = create_plant(client)
     assert plant["name"] == "Томат"
-    assert (
-        client.get(f"/api/v1/plants/{plant['id']}", headers=headers).status_code == 200
-    )
+    assert client.get(f"/api/v1/plants/{plant['id']}", headers=headers).status_code == 200
 
 
 def test_update_garden_and_plant_with_ownership(client):
@@ -328,10 +338,7 @@ def test_update_garden_and_plant_with_ownership(client):
     assert updated.status_code == 200
     assert updated.json()["name"] == "Черри"
     assert (
-        client.patch(
-            f"/api/v1/plants/{plant['id']}", headers=headers, json={}
-        ).status_code
-        == 422
+        client.patch(f"/api/v1/plants/{plant['id']}", headers=headers, json={}).status_code == 422
     )
     assert (
         client.patch(
@@ -340,9 +347,7 @@ def test_update_garden_and_plant_with_ownership(client):
         == 422
     )
 
-    duplicate = client.post(
-        "/api/v1/gardens", headers=headers, json={"name": "Второй сад"}
-    )
+    duplicate = client.post("/api/v1/gardens", headers=headers, json={"name": "Второй сад"})
     assert duplicate.status_code == 201
     assert (
         client.patch(
@@ -374,10 +379,7 @@ def test_update_garden_and_plant_with_ownership(client):
         == 404
     )
     assert (
-        client.delete(
-            f"/api/v1/plants/{plant['id']}", headers=stranger_headers
-        ).status_code
-        == 404
+        client.delete(f"/api/v1/plants/{plant['id']}", headers=stranger_headers).status_code == 404
     )
 
 
@@ -407,17 +409,9 @@ def test_delete_plant_removes_related_data_and_photo_file(client):
     plant_directory = settings.upload_dir / str(plant["id"])
     assert any(plant_directory.iterdir())
 
-    assert (
-        client.delete(f"/api/v1/plants/{plant['id']}", headers=headers).status_code
-        == 204
-    )
-    assert (
-        client.get(f"/api/v1/plants/{plant['id']}", headers=headers).status_code == 404
-    )
-    assert (
-        client.get(f"/api/v1/photos/{uploaded['id']}", headers=headers).status_code
-        == 404
-    )
+    assert client.delete(f"/api/v1/plants/{plant['id']}", headers=headers).status_code == 204
+    assert client.get(f"/api/v1/plants/{plant['id']}", headers=headers).status_code == 404
+    assert client.get(f"/api/v1/photos/{uploaded['id']}", headers=headers).status_code == 404
     assert not plant_directory.exists()
 
 
@@ -429,10 +423,7 @@ def test_delete_garden_cascades_plants_and_files(client):
         files=[("files", ("leaf.png", image_bytes("PNG"), "image/png"))],
     )
     assert (
-        client.delete(
-            f"/api/v1/gardens/{plant['garden_id']}", headers=headers
-        ).status_code
-        == 204
+        client.delete(f"/api/v1/gardens/{plant['garden_id']}", headers=headers).status_code == 204
     )
     assert client.get("/api/v1/gardens", headers=headers).json() == []
     assert client.get("/api/v1/plants", headers=headers).json() == []
@@ -501,14 +492,8 @@ def test_care_journal_crud_history_and_ownership(client):
         == 404
     )
 
-    assert (
-        client.delete(f"/api/v1/care-events/{event['id']}", headers=headers).status_code
-        == 204
-    )
-    assert (
-        client.get(f"/api/v1/plants/{plant['id']}/care-events", headers=headers).json()
-        == []
-    )
+    assert client.delete(f"/api/v1/care-events/{event['id']}", headers=headers).status_code == 204
+    assert client.get(f"/api/v1/plants/{plant['id']}/care-events", headers=headers).json() == []
 
 
 def test_care_journal_validates_time_and_amount(client):
@@ -523,9 +508,7 @@ def test_care_journal_validates_time_and_amount(client):
         == 422
     )
     assert (
-        client.post(
-            path, headers=headers, json={"event_type": "watering", "unit": "l"}
-        ).status_code
+        client.post(path, headers=headers, json={"event_type": "watering", "unit": "l"}).status_code
         == 422
     )
 
@@ -569,10 +552,7 @@ def test_reminders_calendar_completion_and_ownership(client):
     )
     assert completed.status_code == 200
     assert completed.json()["completed"] is True
-    assert (
-        client.get(f"/api/v1/plants/{plant['id']}/reminders", headers=headers).json()
-        == []
-    )
+    assert client.get(f"/api/v1/plants/{plant['id']}/reminders", headers=headers).json() == []
     all_reminders = client.get(
         f"/api/v1/plants/{plant['id']}/reminders",
         headers=headers,
@@ -588,9 +568,9 @@ def test_reminders_calendar_completion_and_ownership(client):
         == []
     )
     assert (
-        client.get(f"/api/v1/plants/{plant['id']}/history", headers=headers).json()[
-            "reminders"
-        ][0]["completed"]
+        client.get(f"/api/v1/plants/{plant['id']}/history", headers=headers).json()["reminders"][0][
+            "completed"
+        ]
         is True
     )
 
@@ -603,12 +583,7 @@ def test_reminders_calendar_completion_and_ownership(client):
         ).status_code
         == 404
     )
-    assert (
-        client.delete(
-            f"/api/v1/reminders/{reminder['id']}", headers=headers
-        ).status_code
-        == 204
-    )
+    assert client.delete(f"/api/v1/reminders/{reminder['id']}", headers=headers).status_code == 204
 
 
 def test_reminders_and_calendar_validate_timezone_and_range(client):
@@ -663,9 +638,7 @@ def test_recurring_reminder_creates_next_occurrence_with_delivery_preferences(cl
         ).status_code
         == 200
     )
-    reminders = client.get(
-        f"/api/v1/plants/{plant['id']}/reminders", headers=headers
-    ).json()
+    reminders = client.get(f"/api/v1/plants/{plant['id']}/reminders", headers=headers).json()
     assert len(reminders) == 1
     assert reminders[0]["recurrence"] == "weekly"
     assert reminders[0]["preferred_channel"] == "telegram"
@@ -738,9 +711,7 @@ def test_calendar_includes_localized_seasonal_tasks(client):
         },
     )
     assert response.status_code == 200
-    seasonal = [
-        item for item in response.json() if item["item_type"] == "seasonal_task"
-    ]
+    seasonal = [item for item in response.json() if item["item_type"] == "seasonal_task"]
     assert seasonal
     assert seasonal[0]["event_type"] == "soil-prep"
     assert seasonal[0]["garden_name"] == "Мой сад"
@@ -780,14 +751,10 @@ def test_due_notifications_are_idempotent_private_and_readable(client):
     notification_id = listed.json()[0]["id"]
     stranger = register(client, "notification-stranger@example.com")
     assert (
-        client.patch(
-            f"/api/v1/notifications/{notification_id}/read", headers=stranger
-        ).status_code
+        client.patch(f"/api/v1/notifications/{notification_id}/read", headers=stranger).status_code
         == 404
     )
-    marked = client.patch(
-        f"/api/v1/notifications/{notification_id}/read", headers=headers
-    )
+    marked = client.patch(f"/api/v1/notifications/{notification_id}/read", headers=headers)
     assert marked.status_code == 200
     assert marked.json()["read_at"] is not None
 
@@ -842,9 +809,7 @@ def test_garden_weather_and_calendar_warnings_are_private(client, monkeypatch):
         },
     )
     assert calendar.status_code == 200
-    warning = next(
-        item for item in calendar.json() if item["item_type"] == "weather_warning"
-    )
+    warning = next(item for item in calendar.json() if item["item_type"] == "weather_warning")
     assert warning["garden_id"] == garden_id
     assert warning["event_type"] == "frost"
     assert warning["severity"] == "critical"
@@ -852,9 +817,7 @@ def test_garden_weather_and_calendar_warnings_are_private(client, monkeypatch):
 
     stranger_headers = register(client, "weather-stranger@example.com")
     assert (
-        client.get(
-            f"/api/v1/gardens/{garden_id}/weather", headers=stranger_headers
-        ).status_code
+        client.get(f"/api/v1/gardens/{garden_id}/weather", headers=stranger_headers).status_code
         == 404
     )
 
@@ -882,9 +845,7 @@ def test_refresh_rotation_logout_and_user_block(client):
     )
     assert registered.status_code == 201
     pair = registered.json()
-    rotated = client.post(
-        "/api/v1/auth/refresh", json={"refresh_token": pair["refresh_token"]}
-    )
+    rotated = client.post("/api/v1/auth/refresh", json={"refresh_token": pair["refresh_token"]})
     assert rotated.status_code == 200
     assert rotated.json()["refresh_token"] != pair["refresh_token"]
     assert (
@@ -992,9 +953,7 @@ def test_gdpr_export_and_account_deletion_remove_private_photo(client):
     exported = client.get("/api/v1/users/me/export", headers=headers)
     assert exported.status_code == 200
     assert exported.json()["plants"][0]["id"] == plant["id"]
-    assert (
-        exported.json()["photos"][0]["download_url"] == f"/api/v1/photos/{photo['id']}"
-    )
+    assert exported.json()["photos"][0]["download_url"] == f"/api/v1/photos/{photo['id']}"
     assert {
         "diagnosis_revisions",
         "diagnosis_questions",
@@ -1126,6 +1085,7 @@ def test_admin_api_is_forbidden_for_regular_users(client):
         "/api/v1/admin/users",
         "/api/v1/admin/diagnosis-jobs",
         "/api/v1/admin/ai-requests",
+        "/api/v1/admin/diagnosis-quality",
         "/api/v1/admin/audit-logs",
         "/api/v1/admin/knowledge/sources",
     ):
@@ -1141,9 +1101,7 @@ def test_admin_overview_and_safe_operational_lists(client):
     assert profile.status_code == 200
     assert profile.json()["is_admin"] is True
 
-    plant, user_headers = create_plant(
-        client, register(client, "managed-user@example.com")
-    )
+    plant, user_headers = create_plant(client, register(client, "managed-user@example.com"))
     photo_id = client.post(
         f"/api/v1/plants/{plant['id']}/photos",
         headers=user_headers,
@@ -1186,10 +1144,17 @@ def test_admin_overview_and_safe_operational_lists(client):
     assert "symptoms" not in requests.json()[0]
     assert "result" not in requests.json()[0]
 
+    quality = client.get("/api/v1/admin/diagnosis-quality?days=30", headers=admin_headers)
+    assert quality.status_code == 200
+    report = quality.json()
+    assert report["kpis"]["diagnoses"] == 1
+    assert report["kpis"]["ai_requests"] == 1
+    assert report["evidence"]["contains_personal_data"] is False
+    assert "symptoms" not in quality.text
+    assert "result" not in quality.text
+
     assert set_admin("admin@example.com", False) is True
-    assert (
-        client.get("/api/v1/admin/overview", headers=admin_headers).status_code == 403
-    )
+    assert client.get("/api/v1/admin/overview", headers=admin_headers).status_code == 403
 
 
 def test_admin_manages_verified_semantic_knowledge(client):
@@ -1221,17 +1186,12 @@ def test_admin_manages_verified_semantic_knowledge(client):
         "source_version": "2026-07-13",
         "active": True,
     }
-    created = client.post(
-        "/api/v1/admin/knowledge/sources", headers=admin_headers, json=payload
-    )
+    created = client.post("/api/v1/admin/knowledge/sources", headers=admin_headers, json=payload)
     assert created.status_code == 200
     assert created.json()["chunks"] == 1
     assert created.json()["embedding_model"] == "local-hash-concepts-v1"
     assert created.json()["review_role"] == "agronomist"
-    assert (
-        retrieve_knowledge("white powdery mildew coating", language="en")[0].id
-        == payload["id"]
-    )
+    assert retrieve_knowledge("white powdery mildew coating", language="en")[0].id == payload["id"]
 
     listed = client.get("/api/v1/admin/knowledge/sources", headers=admin_headers)
     assert listed.status_code == 200
@@ -1942,9 +1902,7 @@ def test_partner_conversion_review_attribution_and_invoice(client):
     assert voided.json()["status"] == "void"
     assert voided.json()["cancellation_number"].startswith(f"AG-CN-{today.year}-")
     assert voided.json()["cancellation_reason"] == cancellation_reason
-    assert (
-        voided.json()["cancellation_document_version"] == "b2b-invoice-cancellation-v1"
-    )
+    assert voided.json()["cancellation_document_version"] == "b2b-invoice-cancellation-v1"
     assert len(voided.json()["cancellation_snapshot_sha256"]) == 64
     assert len(voided.json()["cancellation_pdf_sha256"]) == 64
     assert voided.json()["cancellation_content_type"] == "application/pdf"
@@ -1956,14 +1914,8 @@ def test_partner_conversion_review_attribution_and_invoice(client):
     )
     assert cancellation_pdf.status_code == 200
     assert cancellation_pdf.content.startswith(b"%PDF-")
-    assert (
-        sha256(cancellation_pdf.content).hexdigest()
-        == voided.json()["cancellation_pdf_sha256"]
-    )
-    assert (
-        voided.json()["cancellation_number"]
-        in cancellation_pdf.headers["content-disposition"]
-    )
+    assert sha256(cancellation_pdf.content).hexdigest() == voided.json()["cancellation_pdf_sha256"]
+    assert voided.json()["cancellation_number"] in cancellation_pdf.headers["content-disposition"]
     assert (
         client.get(
             f"/api/v1/partner/invoices/{invoice.json()['id']}/cancellation.pdf",
@@ -2057,9 +2009,7 @@ def test_partner_conversion_review_attribution_and_invoice(client):
     }
     payments = client.get("/api/v1/admin/partner-payments", headers=admin_headers)
     assert {item["status"] for item in payments.json()} == {"matched", "unmatched"}
-    unmatched_payment = next(
-        item for item in payments.json() if item["status"] == "unmatched"
-    )
+    unmatched_payment = next(item for item in payments.json() if item["status"] == "unmatched")
     rejected_payment = client.patch(
         f"/api/v1/admin/partner-payments/{unmatched_payment['id']}",
         headers=admin_headers,
@@ -2084,10 +2034,7 @@ def test_partner_conversion_review_attribution_and_invoice(client):
         == 403
     )
     paid = client.get("/api/v1/partner/invoices", headers=owner_headers).json()
-    assert (
-        next(item for item in paid if item["id"] == reissued.json()["id"])["status"]
-        == "paid"
-    )
+    assert next(item for item in paid if item["id"] == reissued.json()["id"])["status"] == "paid"
 
     manual_partner = client.post(
         "/api/v1/admin/partners",
@@ -2227,13 +2174,8 @@ def test_manual_invoice_payment_creates_audited_payment_record(client):
     assert payment.json()["external_id"] == "MANUAL-TRANSFER-001"
     assert payment.json()["amount_cents"] == 900
     assert payment.json()["status"] == "matched"
-    invoices = client.get(
-        "/api/v1/admin/partner-invoices", headers=admin_headers
-    ).json()
-    assert (
-        next(item for item in invoices if item["id"] == invoice["id"])["status"]
-        == "paid"
-    )
+    invoices = client.get("/api/v1/admin/partner-invoices", headers=admin_headers).json()
+    assert next(item for item in invoices if item["id"] == invoice["id"])["status"] == "paid"
     assert (
         client.post(
             f"/api/v1/admin/partner-invoices/{invoice['id']}/manual-payment",
@@ -2249,9 +2191,7 @@ def test_manual_invoice_payment_creates_audited_payment_record(client):
     )
 
 
-def test_b2b_invoice_endpoints_are_hidden_when_feature_is_disabled(
-    client, monkeypatch
-):
+def test_b2b_invoice_endpoints_are_hidden_when_feature_is_disabled(client, monkeypatch):
     admin_headers = register(client, "disabled-invoicing-admin@example.com")
     from app.admin_cli import set_admin
 
@@ -2311,9 +2251,7 @@ def test_signed_partner_redirect_and_authenticated_postback(client):
     assert repeated["id"] == first["id"]
     assert first["redirect_url"].startswith("/product/go/")
     signed_click_id = first["redirect_url"].rsplit("/", 1)[1]
-    key = client.post("/api/v1/partner/postback-key", headers=owner_headers).json()[
-        "api_key"
-    ]
+    key = client.post("/api/v1/partner/postback-key", headers=owner_headers).json()["api_key"]
     postback_payload = {
         "signed_click_id": signed_click_id,
         "partner_reference": "order-attributed-001",
@@ -2333,9 +2271,7 @@ def test_signed_partner_redirect_and_authenticated_postback(client):
     assert redirect.headers["location"].startswith(
         "https://partner.example.com/item?campaign=summer&ai_garden_click_id="
     )
-    assert (
-        client.get("/product/go/not-a-token", follow_redirects=False).status_code == 404
-    )
+    assert client.get("/product/go/not-a-token", follow_redirects=False).status_code == 404
     assert (
         client.post(
             "/api/v1/partner/conversions/postback",
@@ -2389,9 +2325,7 @@ def test_safe_diagnosis_flow(client):
     assert response.json()["model_name"] == "mock-rule-based"
     with SessionLocal() as db:
         audit = db.scalar(
-            select(AIRequestLog).where(
-                AIRequestLog.diagnosis_id == response.json()["id"]
-            )
+            select(AIRequestLog).where(AIRequestLog.diagnosis_id == response.json()["id"])
         )
         assert audit is not None
         assert audit.success is True
@@ -2441,29 +2375,48 @@ def test_diagnosis_marks_degraded_response_from_fallback_provider(client):
 
 
 def test_degraded_notice_follows_user_language(client):
-    response = client.post("/api/v1/auth/register", json={
-        "email": "lang@example.com",
-        "name": "Lang",
-        "password": "strong-password",
-        "language": "en",
-        "region": "Riga",
-    })
+    response = client.post(
+        "/api/v1/auth/register",
+        json={
+            "email": "lang@example.com",
+            "name": "Lang",
+            "password": "strong-password",
+            "language": "en",
+            "region": "Riga",
+        },
+    )
     assert response.status_code == 201
     headers = {"Authorization": f"Bearer {response.json()['access_token']}"}
-    garden = client.post("/api/v1/gardens", headers=headers,
-                         json={"name": "G", "kind": "greenhouse", "location": "Riga"})
-    plant = client.post("/api/v1/plants", headers=headers, json={
-        "garden_id": garden.json()["id"], "name": "Spruce",
-        "growing_place": "open_ground", "region": "Riga",
-    }).json()
+    garden = client.post(
+        "/api/v1/gardens",
+        headers=headers,
+        json={"name": "G", "kind": "greenhouse", "location": "Riga"},
+    )
+    plant = client.post(
+        "/api/v1/plants",
+        headers=headers,
+        json={
+            "garden_id": garden.json()["id"],
+            "name": "Spruce",
+            "growing_place": "open_ground",
+            "region": "Riga",
+        },
+    ).json()
     photo_id = client.post(
-        f"/api/v1/plants/{plant['id']}/photos", headers=headers,
+        f"/api/v1/plants/{plant['id']}/photos",
+        headers=headers,
         files=[("files", ("leaf.jpg", image_bytes(), "image/jpeg"))],
     ).json()[0]["id"]
-    job = client.post("/api/v1/diagnoses/async", headers=headers, json={
-        "plant_id": plant["id"], "symptoms": "Yellow needles",
-        "damaged_part": "leaf", "photo_ids": [photo_id],
-    }).json()
+    job = client.post(
+        "/api/v1/diagnoses/async",
+        headers=headers,
+        json={
+            "plant_id": plant["id"],
+            "symptoms": "Yellow needles",
+            "damaged_part": "leaf",
+            "photo_ids": [photo_id],
+        },
+    ).json()
     assert job["status"] == "succeeded"
 
     with SessionLocal() as db:
@@ -2499,46 +2452,31 @@ def test_background_diagnosis_job_completes_and_is_idempotent(client):
     assert job["attempts"] == 1
     assert job["diagnosis_id"] is not None
     assert (
-        client.get(
-            f"/api/v1/diagnoses/{job['diagnosis_id']}", headers=headers
-        ).status_code
-        == 200
+        client.get(f"/api/v1/diagnoses/{job['diagnosis_id']}", headers=headers).status_code == 200
     )
-    assert (
-        client.get(f"/api/v1/diagnosis-jobs/{job['id']}", headers=headers).status_code
-        == 200
-    )
+    assert client.get(f"/api/v1/diagnosis-jobs/{job['id']}", headers=headers).status_code == 200
 
     from app.services.diagnosis_job_service import process_diagnosis_job
 
-    assert (
-        process_diagnosis_job(job["id"], gateway=main_module.ai_gateway)
-        == job["diagnosis_id"]
-    )
+    assert process_diagnosis_job(job["id"], gateway=main_module.ai_gateway) == job["diagnosis_id"]
     with SessionLocal() as db:
         assert len(list(db.scalars(select(Diagnosis)))) == 1
 
     stranger_headers = register(client, "job-stranger@example.com")
     assert (
-        client.get(
-            f"/api/v1/diagnosis-jobs/{job['id']}", headers=stranger_headers
-        ).status_code
+        client.get(f"/api/v1/diagnosis-jobs/{job['id']}", headers=stranger_headers).status_code
         == 404
     )
 
 
-def test_background_job_applies_and_audits_deterministic_safety_policy(
-    client, monkeypatch
-):
+def test_background_job_applies_and_audits_deterministic_safety_policy(client, monkeypatch):
     plant, headers = create_plant(client)
     photo_id = client.post(
         f"/api/v1/plants/{plant['id']}/photos",
         headers=headers,
         files=[("files", ("leaf.jpg", image_bytes(), "image/jpeg"))],
     ).json()[0]["id"]
-    monkeypatch.setattr(
-        main_module, "dispatch_diagnosis_job", lambda *_args, **_kwargs: "queued"
-    )
+    monkeypatch.setattr(main_module, "dispatch_diagnosis_job", lambda *_args, **_kwargs: "queued")
     job = client.post(
         "/api/v1/diagnoses/async",
         headers=headers,
@@ -2594,9 +2532,7 @@ def test_diagnosis_job_lease_prevents_two_paid_ai_calls(client, monkeypatch):
         headers=headers,
         files=[("files", ("leaf.jpg", image_bytes(), "image/jpeg"))],
     ).json()[0]["id"]
-    monkeypatch.setattr(
-        main_module, "dispatch_diagnosis_job", lambda *_args, **_kwargs: "queued"
-    )
+    monkeypatch.setattr(main_module, "dispatch_diagnosis_job", lambda *_args, **_kwargs: "queued")
     job = client.post(
         "/api/v1/diagnoses/async",
         headers=headers,
@@ -2651,9 +2587,7 @@ def test_queued_jobs_count_toward_monthly_quota(client, monkeypatch):
         files=[("files", ("leaf.jpg", image_bytes(), "image/jpeg"))],
     ).json()[0]["id"]
     monkeypatch.setattr(main_module.settings, "free_diagnoses_per_month", 1)
-    monkeypatch.setattr(
-        main_module, "dispatch_diagnosis_job", lambda *_args, **_kwargs: "queued"
-    )
+    monkeypatch.setattr(main_module, "dispatch_diagnosis_job", lambda *_args, **_kwargs: "queued")
     payload = {
         "plant_id": plant["id"],
         "symptoms": "На листьях появились заметные изменения",
@@ -2663,12 +2597,7 @@ def test_queued_jobs_count_toward_monthly_quota(client, monkeypatch):
     first = client.post("/api/v1/diagnoses/async", headers=headers, json=payload)
     assert first.status_code == 202
     assert first.json()["status"] == "queued"
-    assert (
-        client.post(
-            "/api/v1/diagnoses/async", headers=headers, json=payload
-        ).status_code
-        == 429
-    )
+    assert client.post("/api/v1/diagnoses/async", headers=headers, json=payload).status_code == 429
 
 
 def test_background_job_retries_transient_provider_errors(client, monkeypatch):
@@ -2678,9 +2607,7 @@ def test_background_job_retries_transient_provider_errors(client, monkeypatch):
         headers=headers,
         files=[("files", ("leaf.jpg", image_bytes(), "image/jpeg"))],
     ).json()[0]["id"]
-    monkeypatch.setattr(
-        main_module, "dispatch_diagnosis_job", lambda *_args, **_kwargs: "queued"
-    )
+    monkeypatch.setattr(main_module, "dispatch_diagnosis_job", lambda *_args, **_kwargs: "queued")
     job_id = client.post(
         "/api/v1/diagnoses/async",
         headers=headers,
@@ -2899,9 +2826,7 @@ def test_sanitizes_image_metadata(client):
     response = client.post(
         f"/api/v1/plants/{plant['id']}/photos",
         headers=headers,
-        files=[
-            ("files", ("with-exif.jpg", image_bytes("JPEG", exif=exif), "image/jpeg"))
-        ],
+        files=[("files", ("with-exif.jpg", image_bytes("JPEG", exif=exif), "image/jpeg"))],
     )
     assert response.status_code == 201
     saved_files = list((settings.upload_dir / str(plant["id"])).iterdir())
@@ -2912,12 +2837,8 @@ def test_sanitizes_image_metadata(client):
 def test_duplicate_garden_and_registration_return_conflict(client):
     headers = register(client)
     payload = {"name": "Одинаковый сад"}
-    assert (
-        client.post("/api/v1/gardens", headers=headers, json=payload).status_code == 201
-    )
-    assert (
-        client.post("/api/v1/gardens", headers=headers, json=payload).status_code == 409
-    )
+    assert client.post("/api/v1/gardens", headers=headers, json=payload).status_code == 201
+    assert client.post("/api/v1/gardens", headers=headers, json=payload).status_code == 409
     duplicate = client.post(
         "/api/v1/auth/register",
         json={
@@ -2948,9 +2869,7 @@ def test_diagnosis_history_answers_reanalysis_and_feedback(client):
     )
     created = resolve_diagnosis_job(client, headers, created)
     diagnosis_id = created.json()["id"]
-    questions = client.get(
-        f"/api/v1/diagnoses/{diagnosis_id}/questions", headers=headers
-    ).json()
+    questions = client.get(f"/api/v1/diagnoses/{diagnosis_id}/questions", headers=headers).json()
     answered = client.post(
         f"/api/v1/diagnoses/{diagnosis_id}/answers",
         headers=headers,
@@ -2966,9 +2885,7 @@ def test_diagnosis_history_answers_reanalysis_and_feedback(client):
     assert answered.status_code == 202
     answered_diagnosis = resolve_diagnosis_job(client, headers, answered)
     assert answered_diagnosis.json()["current_revision"] == 2
-    reanalyzed = client.post(
-        f"/api/v1/diagnoses/{diagnosis_id}/reanalyze", headers=headers
-    )
+    reanalyzed = client.post(f"/api/v1/diagnoses/{diagnosis_id}/reanalyze", headers=headers)
     assert reanalyzed.status_code == 202
     reanalyzed_diagnosis = resolve_diagnosis_job(client, headers, reanalyzed)
     assert reanalyzed_diagnosis.json()["current_revision"] == 3
@@ -3001,15 +2918,11 @@ def test_diagnosis_history_answers_reanalysis_and_feedback(client):
     ]
 
     assert (
-        client.post(
-            f"/api/v1/diagnoses/{diagnosis_id}/reanalyze", headers=headers
-        ).status_code
+        client.post(f"/api/v1/diagnoses/{diagnosis_id}/reanalyze", headers=headers).status_code
         == 202
     )
     assert (
-        client.post(
-            f"/api/v1/diagnoses/{diagnosis_id}/reanalyze", headers=headers
-        ).status_code
+        client.post(f"/api/v1/diagnoses/{diagnosis_id}/reanalyze", headers=headers).status_code
         == 429
     )
 
@@ -3028,10 +2941,7 @@ def test_monthly_diagnosis_quota(client):
         "photo_ids": [photo_id],
     }
     for _ in range(5):
-        assert (
-            client.post("/api/v1/diagnoses", headers=headers, json=payload).status_code
-            == 202
-        )
+        assert client.post("/api/v1/diagnoses", headers=headers, json=payload).status_code == 202
     limited = client.post("/api/v1/diagnoses", headers=headers, json=payload)
     assert limited.status_code == 429
 
@@ -3073,9 +2983,7 @@ def test_ai_timeout_returns_504_and_is_audited(client, monkeypatch):
     assert response.json()["status"] == "failed"
     assert response.json()["error_type"] == "provider_timeout"
     with SessionLocal() as db:
-        audit = db.scalar(
-            select(AIRequestLog).where(AIRequestLog.request_id == "req_timeout_test")
-        )
+        audit = db.scalar(select(AIRequestLog).where(AIRequestLog.request_id == "req_timeout_test"))
         assert audit is not None
         assert audit.success is False
         assert audit.error_type == "provider_timeout"
@@ -3096,26 +3004,13 @@ def test_photo_download_is_private(client):
 
     stranger_headers = register(client, "stranger@example.com")
     assert (
-        client.get(
-            f"/api/v1/photos/{uploaded['id']}", headers=stranger_headers
-        ).status_code
+        client.get(f"/api/v1/photos/{uploaded['id']}", headers=stranger_headers).status_code == 404
+    )
+    assert (
+        client.delete(f"/api/v1/photos/{uploaded['id']}", headers=stranger_headers).status_code
         == 404
     )
     assert (
-        client.delete(
-            f"/api/v1/photos/{uploaded['id']}", headers=stranger_headers
-        ).status_code
-        == 404
+        client.delete(f"/api/v1/photos/{uploaded['id']}", headers=owner_headers).status_code == 204
     )
-    assert (
-        client.delete(
-            f"/api/v1/photos/{uploaded['id']}", headers=owner_headers
-        ).status_code
-        == 204
-    )
-    assert (
-        client.get(
-            f"/api/v1/photos/{uploaded['id']}", headers=owner_headers
-        ).status_code
-        == 404
-    )
+    assert client.get(f"/api/v1/photos/{uploaded['id']}", headers=owner_headers).status_code == 404

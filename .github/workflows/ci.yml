@@ -18,7 +18,7 @@ jobs:
         run: |
           pip-audit -r requirements.lock
           pip-audit -r requirements-dev.lock
-      - run: ruff check app tests migrations evals
+      - run: ruff check app tests migrations evals scripts
       # signal-метод таймаута работает на Linux без оверхеда thread-метода (Windows-разработчики используют thread из pyproject.toml)
       - run: pytest -q -o timeout_method=signal
 

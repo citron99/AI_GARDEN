@@ -9,13 +9,27 @@ from app.services.storage_service import delete_storage_reference
 
 
 def enqueue_photo_deletions(db: Session, photos: list[PlantPhoto]) -> int:
+    queued = 0
     for photo in photos:
-        db.add(StorageDeletionOutbox(
-            backend="s3" if photo.storage_key and settings.storage_backend == "s3" else "local",
-            storage_key=photo.storage_key,
-            file_path=photo.file_path,
-        ))
-    return len(photos)
+        if photo.storage_key and settings.storage_backend == "s3":
+            db.add(StorageDeletionOutbox(
+                backend="s3",
+                storage_key=photo.storage_key,
+            ))
+            queued += 1
+        if photo.file_path:
+            db.add(StorageDeletionOutbox(
+                backend="local",
+                file_path=photo.file_path,
+            ))
+            queued += 1
+        elif photo.storage_key and settings.storage_backend != "s3":
+            db.add(StorageDeletionOutbox(
+                backend="local",
+                storage_key=photo.storage_key,
+            ))
+            queued += 1
+    return queued
 
 
 def process_storage_deletion_outbox(

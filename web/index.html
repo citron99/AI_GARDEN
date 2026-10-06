@@ -138,6 +138,27 @@
           </div>
           <p id="adminStatus" class="muted">Загружаем метрики…</p>
           <div id="adminMetrics" class="admin-metrics"></div>
+          <section class="card admin-section diagnosis-quality-cockpit">
+            <div class="quality-header">
+              <div><p class="eyebrow">Diagnosis Quality Cockpit</p><h2>Качество диагностики</h2><p class="muted">Наблюдаемость по feedback, safety, latency и версиям моделей. Без фотографий, симптомов и персональных данных.</p></div>
+              <strong id="qualityScore" class="quality-score">—<small>/100</small></strong>
+            </div>
+            <form id="qualityFilterForm" class="quality-filters">
+              <label>Период<select name="days"><option value="7">7 дней</option><option value="30" selected>30 дней</option><option value="90">90 дней</option><option value="365">365 дней</option></select></label>
+              <label>Провайдер<input name="provider" maxlength="40" placeholder="все"></label>
+              <label>Prompt version<input name="prompt_version" maxlength="80" placeholder="все"></label>
+              <button class="button ghost" type="submit">Применить</button>
+            </form>
+            <div id="qualityKpis" class="quality-kpis"></div>
+            <div class="quality-grid">
+              <section><h3>Контрольные сигналы</h3><div id="qualitySignals" class="quality-signals"></div></section>
+              <section><h3>Сравнение с прошлым периодом</h3><div id="qualityRegressions" class="quality-signals"></div></section>
+            </div>
+            <h3>Провайдеры, модели и prompt versions</h3>
+            <div class="table-scroll"><table><thead><tr><th>Срез</th><th>Запросы</th><th>Success</th><th>P95</th><th>Rating</th><th>Helpful</th><th>Стоимость</th></tr></thead><tbody id="qualitySlices"></tbody></table></div>
+            <div id="qualityTrend" class="quality-trend"></div>
+            <p id="qualityEvidence" class="muted"></p>
+          </section>
           <section class="card admin-section">
             <h2>Каталог партнёров</h2>
             <div class="catalog-admin-grid">

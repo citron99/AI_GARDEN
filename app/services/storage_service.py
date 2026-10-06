@@ -207,8 +207,12 @@ def delete_storage_reference(
         except Exception as exc:
             raise StorageError("Не удалось удалить фотографию") from exc
         return
-    if file_path:
-        path = Path(file_path).resolve()
+    if file_path or storage_key:
+        path = (
+            Path(file_path).resolve()
+            if file_path
+            else _safe_local_path(storage_key or "")
+        )
         try:
             path.relative_to(settings.upload_dir.resolve())
         except ValueError:

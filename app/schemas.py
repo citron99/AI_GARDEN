@@ -221,9 +221,7 @@ class ReminderUpdate(BaseModel):
             )
         )
         if controls > 1:
-            raise ValueError(
-                "completed, snooze_minutes and skip_occurrence are mutually exclusive"
-            )
+            raise ValueError("completed, snooze_minutes and skip_occurrence are mutually exclusive")
         return self
 
 
@@ -245,17 +243,11 @@ class ReminderRead(BaseModel):
     @field_validator("due_at", "completed_at", "created_at")
     @classmethod
     def assume_utc_for_sqlite(cls, value: datetime | None) -> datetime | None:
-        return (
-            value.replace(tzinfo=UTC)
-            if value is not None and value.tzinfo is None
-            else value
-        )
+        return value.replace(tzinfo=UTC) if value is not None and value.tzinfo is None else value
 
 
 class CalendarItemRead(BaseModel):
-    item_type: str = Field(
-        pattern="^(reminder|care_event|weather_warning|seasonal_task)$"
-    )
+    item_type: str = Field(pattern="^(reminder|care_event|weather_warning|seasonal_task)$")
     reference_id: int | str
     plant_id: int | None = None
     plant_name: str | None = None
@@ -289,11 +281,7 @@ class NotificationRead(BaseModel):
     @field_validator("event_at", "read_at", "telegram_sent_at", "created_at")
     @classmethod
     def notification_assume_utc(cls, value: datetime | None) -> datetime | None:
-        return (
-            value.replace(tzinfo=UTC)
-            if value is not None and value.tzinfo is None
-            else value
-        )
+        return value.replace(tzinfo=UTC) if value is not None and value.tzinfo is None else value
 
 
 class WeatherDailyRead(BaseModel):
@@ -311,9 +299,7 @@ class WeatherDailyRead(BaseModel):
 
 class WeatherWarningRead(BaseModel):
     date: date
-    kind: str = Field(
-        pattern="^(frost|heat|heavy_rain|strong_wind|snow|irrigation_check)$"
-    )
+    kind: str = Field(pattern="^(frost|heat|heavy_rain|strong_wind|snow|irrigation_check)$")
     severity: str = Field(pattern="^(info|warning|critical)$")
     title: str
     advice: str
@@ -403,35 +389,23 @@ class DiagnosisResult(BaseModel):
                 raise ValueError("valid input cannot have cannot_analyze_reason")
             if self.analysis_outcome == AnalysisOutcome.cannot_analyze:
                 raise ValueError("valid input requires a completed analysis outcome")
-            if (
-                self.analysis_outcome == AnalysisOutcome.no_visible_problem
-                and self.possible_causes
-            ):
+            if self.analysis_outcome == AnalysisOutcome.no_visible_problem and self.possible_causes:
                 raise ValueError("no_visible_problem must not contain possible causes")
             if (
                 self.analysis_outcome == AnalysisOutcome.possible_problem
                 and not self.possible_causes
             ):
-                raise ValueError(
-                    "possible_problem requires at least one possible cause"
-                )
+                raise ValueError("possible_problem requires at least one possible cause")
         else:
             if self.possible_causes:
                 raise ValueError("non-valid input must not contain possible causes")
             if not self.cannot_analyze_reason:
                 raise ValueError("non-valid input requires cannot_analyze_reason")
             if self.analysis_status != "cannot_analyze":
-                raise ValueError(
-                    "non-valid input requires analysis_status=cannot_analyze"
-                )
+                raise ValueError("non-valid input requires analysis_status=cannot_analyze")
             if self.analysis_outcome != AnalysisOutcome.cannot_analyze:
-                raise ValueError(
-                    "non-valid input requires analysis_outcome=cannot_analyze"
-                )
-            if (
-                self.input_status == DiagnosisInputStatus.not_a_plant
-                and self.plant_detected
-            ):
+                raise ValueError("non-valid input requires analysis_outcome=cannot_analyze")
+            if self.input_status == DiagnosisInputStatus.not_a_plant and self.plant_detected:
                 raise ValueError("not_a_plant requires plant_detected=false")
             if (
                 self.input_status == DiagnosisInputStatus.poor_quality
@@ -812,9 +786,7 @@ class ProductRecommendationRuleCreate(BaseModel):
     country_code: str | None = Field(default=None, pattern=r"^[A-Z]{2}$")
     registration_country: str | None = Field(default=None, min_length=2, max_length=2)
     registration_number: str | None = Field(default=None, max_length=100)
-    registration_url: str | None = Field(
-        default=None, max_length=500, pattern=r"^https://"
-    )
+    registration_url: str | None = Field(default=None, max_length=500, pattern=r"^https://")
     registration_expires_on: date | None = None
     expert_verified: bool = False
 
@@ -896,9 +868,7 @@ class RegistrationSnapshotImport(BaseModel):
     source_url: str = Field(max_length=1000, pattern=r"^https://")
     source_version: str = Field(min_length=1, max_length=120)
     complete_snapshot: bool = False
-    records: list[RegulatedProductRegistrationUpsert] = Field(
-        min_length=1, max_length=5000
-    )
+    records: list[RegulatedProductRegistrationUpsert] = Field(min_length=1, max_length=5000)
 
 
 class RegulatedProductRegistrationRead(RegulatedProductRegistrationUpsert):
@@ -941,9 +911,7 @@ class PartnerPostbackKeyRead(BaseModel):
 
 class PartnerConversionPostback(BaseModel):
     signed_click_id: str = Field(min_length=40, max_length=500)
-    partner_reference: str = Field(
-        min_length=3, max_length=120, pattern=r"^[A-Za-z0-9._:-]+$"
-    )
+    partner_reference: str = Field(min_length=3, max_length=120, pattern=r"^[A-Za-z0-9._:-]+$")
     conversion_value_cents: int = Field(ge=0, le=100_000_000)
 
 
@@ -984,9 +952,7 @@ class PartnerLeadRead(BaseModel):
 
 
 class PartnerConversionClaim(BaseModel):
-    partner_reference: str = Field(
-        min_length=3, max_length=120, pattern=r"^[A-Za-z0-9._:-]+$"
-    )
+    partner_reference: str = Field(min_length=3, max_length=120, pattern=r"^[A-Za-z0-9._:-]+$")
     conversion_value_cents: int = Field(ge=0, le=100_000_000)
 
 
@@ -1112,9 +1078,7 @@ class PartnerPaymentResolve(BaseModel):
 
 
 class PartnerManualPaymentCreate(BaseModel):
-    external_id: str = Field(
-        min_length=3, max_length=160, pattern=r"^[A-Za-z0-9._:/-]+$"
-    )
+    external_id: str = Field(min_length=3, max_length=160, pattern=r"^[A-Za-z0-9._:/-]+$")
     payment_method: Literal["bank_transfer", "cash", "card", "other"]
     booking_date: date
     note: str = Field(min_length=3, max_length=500)
@@ -1270,6 +1234,18 @@ class AdminAIRequestRead(BaseModel):
     response_ms: int
     estimated_cost: float
     created_at: datetime
+
+
+class DiagnosisQualityReportRead(BaseModel):
+    period: dict
+    quality_score: int = Field(ge=0, le=100)
+    kpis: dict
+    signals: list[dict]
+    slices: list[dict]
+    trend: list[dict]
+    regressions: list[dict]
+    safety_reasons: list[dict]
+    evidence: dict
 
 
 class AdminAuditLogRead(BaseModel):

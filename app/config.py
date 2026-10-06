@@ -101,6 +101,7 @@ class Settings(BaseSettings):
     telegram_webhook_max_bytes: int = 262_144
     telegram_timezone: str = "Europe/Riga"
     environment: str = "development"
+    demo_login_enabled: bool = True
     jwt_secret: str
     access_token_expire_minutes: int = 30
     refresh_token_expire_days: int = 30
