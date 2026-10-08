@@ -126,6 +126,7 @@ from app.services.account_security_service import (
 )
 from app.services.alert_service import dispatch_operational_alert
 from app.services.billing_service import BillingProviderError, cancel_stripe_subscription
+from app.services.demo_seed import ensure_demo_workspace
 from app.services.diagnosis_job_service import is_fallback_response
 from app.services.diagnosis_quality_service import build_diagnosis_quality_report
 from app.services.image_service import (
@@ -570,19 +571,9 @@ def demo_login(
         )
         db.add(user)
         db.flush()
-        garden = Garden(user_id=user.id, name="Демо-сад", kind="garden", location="Дом")
-        db.add(garden)
-        db.flush()
-        db.add(
-            Plant(
-                garden_id=garden.id,
-                name="Фикус Бенджамина",
-                species="Ficus benjamina",
-                growing_place="indoor",
-            )
-        )
-        db.commit()
-        db.refresh(user)
+    ensure_demo_workspace(db, user)
+    db.commit()
+    db.refresh(user)
     pair = create_token_pair(user, db)
     _set_refresh_cookie(response, pair.refresh_token)
     return pair

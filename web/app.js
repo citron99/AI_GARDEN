@@ -4,7 +4,7 @@ const state = {
   partnerAccount: null,
   partnerCommerceEnabled: true,
   b2bInvoicingEnabled: true,
-  demoLoginEnabled: false,
+  demoLoginEnabled: true,
   gardens: [],
   plants: [],
   selectedGardenId: null,
@@ -198,7 +198,7 @@ function clearSession() {
   appView.classList.add("hidden");
   authView.classList.remove("hidden");
   byId("logoutButton").classList.add("hidden");
-  byId("demoLoginButton").classList.toggle("hidden", !state.demoLoginEnabled);
+  byId("demoLoginButton").classList.toggle("hidden", Boolean(state.token));
   byId("adminButton").classList.add("hidden");
   byId("partnerButton").classList.add("hidden");
   byId("billingButton").classList.add("hidden");
@@ -263,8 +263,6 @@ async function enterApplication() {
     byId("billingButton").classList.remove("hidden");
     byId("telegramButton").classList.remove("hidden");
     byId("dashboardSettingsButton").classList.remove("hidden");
-    byId("profileName").textContent = state.profile.name;
-    byId("profileMeta").textContent = [state.profile.region, state.profile.email].filter(Boolean).join(" · ");
     loadDashboardPreferences();
     await loadWorkspaceData();
     const billingResult = new URLSearchParams(window.location.search).get("billing");
@@ -2515,7 +2513,9 @@ async function boot() {
     badge.classList.remove("hidden");
     state.demoLoginEnabled = Boolean(health.demo_login_enabled);
     byId("demoLoginButton").classList.toggle("hidden", !(state.demoLoginEnabled && !state.token));
-  } catch (_) { /* health badge is non-critical */ }
+  } catch (_) {
+    byId("demoLoginButton").classList.toggle("hidden", Boolean(state.token));
+  }
   const actionParams = new URLSearchParams(window.location.hash.slice(1));
   const action = actionParams.get("action");
   const actionToken = actionParams.get("token");

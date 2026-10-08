@@ -76,9 +76,9 @@ class Settings(BaseSettings):
     stripe_api_version: str = "2026-02-25.clover"
     stripe_webhook_tolerance_seconds: int = 300
     stripe_webhook_max_bytes: int = 262_144
-    billing_pro_monthly_cents: int = 900
+    billing_pro_monthly_cents: int = 20000
     pro_diagnoses_per_month: int = 100
-    billing_currency: str = "eur"
+    billing_currency: str = "rub"
     billing_success_url: str = "http://localhost:8000/?billing=success"
     billing_cancel_url: str = "http://localhost:8000/?billing=cancelled"
     partner_commerce_enabled: bool = False

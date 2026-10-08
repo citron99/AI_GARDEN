@@ -103,11 +103,11 @@ def test_demo_login_creates_verified_user_with_seed_data_and_is_idempotent(clien
 
     gardens = client.get("/api/v1/gardens", headers=headers)
     assert gardens.status_code == 200
-    assert len(gardens.json()) == 1
+    assert len(gardens.json()) == 4
 
     plants = client.get("/api/v1/plants", headers=headers)
     assert plants.status_code == 200
-    assert len(plants.json()) == 1
+    assert len(plants.json()) == 14
 
     # Повторный вход возвращает тот же аккаунт и не плодит сады
     repeat = client.post("/api/v1/auth/demo-login")
@@ -116,7 +116,7 @@ def test_demo_login_creates_verified_user_with_seed_data_and_is_idempotent(clien
     repeat_profile = client.get("/api/v1/users/me", headers=repeat_headers)
     assert repeat_profile.json()["email"] == "demo@ai-garden.local"
     repeat_gardens = client.get("/api/v1/gardens", headers=repeat_headers)
-    assert len(repeat_gardens.json()) == 1
+    assert len(repeat_gardens.json()) == 4
 
 
 def test_demo_login_is_disabled_in_production(client, monkeypatch):
