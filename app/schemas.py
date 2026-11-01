@@ -870,6 +870,15 @@ class RegistrationSnapshotImport(BaseModel):
     complete_snapshot: bool = False
     records: list[RegulatedProductRegistrationUpsert] = Field(min_length=1, max_length=5000)
 
+    @model_validator(mode="after")
+    def reject_duplicate_records(self):
+        # Без проверки повтор в payload доходит до UniqueConstraint и отдаёт 500:
+        # первый объект ещё не в базе (autoflush выключен), а commit случается позже валидации.
+        keys = {(record.jurisdiction, record.registration_number) for record in self.records}
+        if len(keys) != len(self.records):
+            raise ValueError("jurisdiction and registration_number must be unique within the payload")
+        return self
+
 
 class RegulatedProductRegistrationRead(RegulatedProductRegistrationUpsert):
     model_config = ConfigDict(from_attributes=True)

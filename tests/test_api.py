@@ -168,6 +168,23 @@ def test_demo_login_can_be_disabled_outside_production(client, monkeypatch):
     assert client.post("/api/v1/auth/demo-login").status_code == 404
 
 
+def test_readiness_failure_hides_internal_error_text(client, monkeypatch):
+    """Healthcheck опрашивает /health/ready без токена, поэтому причина сбоя
+    остаётся в логе и алерте: в тексте исключения бывает строка подключения к базе."""
+    import app.routers.health as health_module
+    from sqlalchemy.exc import OperationalError
+
+    def refuse(*args, **kwargs):
+        raise OperationalError("SELECT 1", {}, Exception("sqlite:///secret.db?password=hunter2"))
+
+    monkeypatch.setattr(health_module.engine, "connect", refuse)
+    response = client.get("/health/ready")
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == {"status": "not_ready", "check": "database"}
+    assert "hunter2" not in response.text
+
+
 def test_host_body_limit_and_production_hsts(client, monkeypatch):
     assert client.get("/health", headers={"host": "untrusted.example"}).status_code == 400
     too_large = client.post(
@@ -1540,6 +1557,18 @@ def test_regulated_product_registry_invalidates_revoked_recommendations(client):
     )
     assert imported.status_code == 200
     assert imported.json()["created"] == 1
+    duplicated = client.post(
+        "/api/v1/admin/regulated-products/import",
+        headers=admin_headers,
+        json={
+            **snapshot,
+            "records": [
+                {**snapshot["records"][0], "registration_number": "VAAD-TEST-DUP"},
+                {**snapshot["records"][0], "registration_number": "VAAD-TEST-DUP"},
+            ],
+        },
+    )
+    assert duplicated.status_code == 422
     registry = client.get(
         "/api/v1/admin/regulated-products?jurisdiction=LV",
         headers=admin_headers,
