@@ -88,6 +88,19 @@ Alembic, имя файла — следующий номер `NNNN_коротк�
 добавляется в проверку `tests/test_migrations.py`. `alembic check` на реальном pgvector
 выполняется отдельным job `postgres-migrations` — дрейф модели и схемы красит CI.
 
+Два подводных камня, которые CI ловит только на PostgreSQL (SQLite их не видит):
+
+* Alembic создаёт `alembic_version.version_num` как `VARCHAR(32)`, а SQLite не следит за
+  длиной вовсе. Идентификатор ревизии `0016_product_safety_and_job_leases` — 34 символа,
+  и на PostgreSQL `upgrade head` падал на нём с `StringDataRightTruncation`. `migrations/env.py`
+  заранее создаёт таблицу с запасом (`VARCHAR(255)`), поэтому длинные id допустимы, но
+  переименовывать уже применённую ревизию нельзя — живые SQLite-базы запомнили старый id.
+* `UNIQUE (col)` в `op.create_table` — отдельный объект схемы. Postgres его отражает,
+  SQLite — нет, поэтому модель обязана объявить тот же `UniqueConstraint` (без имени:
+  сопоставление идёт по набору колонок), иначе `alembic check` предлагает удалить констрейнт.
+  Сырой pgvector-индекс `ix_knowledge_chunks_embedding_hnsw` из `0014` описать в модели
+  нельзя (SQLite его не умеет), он исключён через `include_object` в `migrations/env.py`.
+
 ## Ошибки и логи
 
 Прикладные сбои поднимаются доменными исключениями с фиксированным русским сообщением

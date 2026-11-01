@@ -1,7 +1,7 @@
 from logging.config import fileConfig
 
 from alembic import context
-from sqlalchemy import engine_from_config, pool
+from sqlalchemy import engine_from_config, pool, text
 
 from app import models  # noqa: F401 - registers ORM metadata
 from app.config import settings
@@ -31,6 +31,29 @@ def compare_column_type(_context, _inspected_column, _metadata_column, inspected
     return normalized not in {"VECTOR", f"VECTOR({metadata_type.dimensions})"}
 
 
+# Alembic жёстко создаёт alembic_version с version_num VARCHAR(32)
+# (alembic/ddl/impl.py::version_table_impl), а id ревизии
+# 0016_product_safety_and_job_leases занимает 34 символа: SQLite молча переносит
+# переполнение, Postgres падает с StringDataRightTruncation прямо посреди upgrade.
+# Таблица создаётся один раз с запасом — alembic видит её и не трогает структуру.
+ENSURE_VERSION_TABLE = """
+CREATE TABLE IF NOT EXISTS alembic_version (
+    version_num VARCHAR(255) NOT NULL,
+    CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num)
+)
+"""
+
+
+def include_object(_object, name, type_, _reflected, _compare_to):
+    """Скрыть от autogenerate pgvector-индекс, который нельзя описать в моделях.
+
+    ix_knowledge_chunks_embedding_hnsw создаётся «raw»-SQL в 0014_knowledge_vectors
+    только для Postgres. В models.py он появился бы и на SQLite (тесты строят схему
+    через create_all), а SQLite такой индекс не умеет — поэтому остаётся исключать.
+    """
+    return not (type_ == "index" and name == "ix_knowledge_chunks_embedding_hnsw")
+
+
 def run_migrations_offline() -> None:
     context.configure(
         url=config.get_main_option("sqlalchemy.url"),
@@ -38,6 +61,7 @@ def run_migrations_offline() -> None:
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
         compare_type=compare_column_type,
+        include_object=include_object,
     )
     with context.begin_transaction():
         context.run_migrations()
@@ -50,7 +74,14 @@ def run_migrations_online() -> None:
         poolclass=pool.NullPool,
     )
     with connectable.connect() as connection:
-        context.configure(connection=connection, target_metadata=target_metadata, compare_type=compare_column_type)
+        connection.execute(text(ENSURE_VERSION_TABLE))
+        connection.commit()
+        context.configure(
+            connection=connection,
+            target_metadata=target_metadata,
+            compare_type=compare_column_type,
+            include_object=include_object,
+        )
         with context.begin_transaction():
             context.run_migrations()
 
