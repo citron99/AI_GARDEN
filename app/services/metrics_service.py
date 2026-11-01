@@ -1,4 +1,5 @@
 from collections import defaultdict
+from collections.abc import Mapping
 from threading import Lock
 
 _lock = Lock()
@@ -34,7 +35,7 @@ def _escape(value: str) -> str:
     return value.replace("\\", "\\\\").replace("\n", "\\n").replace('"', '\\"')
 
 
-def render_metrics(gauges: dict[str, float | int]) -> str:
+def render_metrics(gauges: Mapping[str, float | int]) -> str:
     with _lock:
         requests = dict(_requests)
         counts = dict(_duration_count)
@@ -53,9 +54,9 @@ def render_metrics(gauges: dict[str, float | int]) -> str:
         "# HELP ai_garden_http_request_duration_seconds_sum Total HTTP request duration.",
         "# TYPE ai_garden_http_request_duration_seconds_sum counter",
     ))
-    for (method, route), value in sorted(sums.items()):
+    for (method, route), seconds in sorted(sums.items()):
         labels = f'method="{_escape(method)}",route="{_escape(route)}"'
-        lines.append(f"ai_garden_http_request_duration_seconds_sum{{{labels}}} {value:.9f}")
+        lines.append(f"ai_garden_http_request_duration_seconds_sum{{{labels}}} {seconds:.9f}")
         lines.append(f"ai_garden_http_request_duration_seconds_count{{{labels}}} {counts[(method, route)]}")
     lines.extend((
         "# HELP ai_garden_http_requests_in_progress Current HTTP requests in this process.",
@@ -68,9 +69,9 @@ def render_metrics(gauges: dict[str, float | int]) -> str:
         lines.append(
             f'ai_garden_unhandled_errors_total{{method="{_escape(method)}",route="{_escape(route)}"}} {value}'
         )
-    for name, value in sorted(gauges.items()):
+    for name, gauge_value in sorted(gauges.items()):
         safe_name = "".join(character if character.isalnum() or character == "_" else "_" for character in name)
-        lines.extend((f"# TYPE ai_garden_{safe_name} gauge", f"ai_garden_{safe_name} {value}"))
+        lines.extend((f"# TYPE ai_garden_{safe_name} gauge", f"ai_garden_{safe_name} {gauge_value}"))
     return "\n".join(lines) + "\n"
 
 

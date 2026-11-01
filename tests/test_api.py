@@ -11,7 +11,8 @@ from PIL import Image
 from sqlalchemy import select
 from sqlalchemy.dialects import postgresql
 
-import app.main as main_module
+import app.gateway as gateway_module
+import app.task_queue as task_queue_module
 from app.ai.base import AIProviderError
 from app.config import settings
 from app.database import SessionLocal
@@ -24,6 +25,8 @@ from app.models import (
     UserNotification,
 )
 from app.schemas import WeatherDailyRead, WeatherForecastRead, WeatherWarningRead
+from app.services.photo_quota_service import reserve_photo_storage
+from app.services.weather_service import weather_service
 
 
 def image_bytes(image_format="JPEG", size=(32, 32), exif=None):
@@ -103,11 +106,44 @@ def test_demo_login_creates_verified_user_with_seed_data_and_is_idempotent(clien
 
     gardens = client.get("/api/v1/gardens", headers=headers)
     assert gardens.status_code == 200
-    assert len(gardens.json()) == 4
+    assert len(gardens.json()) == 6
 
     plants = client.get("/api/v1/plants", headers=headers)
     assert plants.status_code == 200
-    assert len(plants.json()) == 14
+    assert len(plants.json()) == 31
+
+    now = datetime.now(UTC)
+    calendar = client.get(
+        "/api/v1/calendar",
+        headers=headers,
+        params={
+            "start": (now - timedelta(days=120)).isoformat(),
+            "end": (now + timedelta(days=45)).isoformat(),
+        },
+    )
+    assert calendar.status_code == 200
+    items = calendar.json()
+    assert {item["item_type"] for item in items} >= {"reminder", "care_event"}
+    assert len({item["plant_name"] for item in items if item["plant_name"]}) == 31
+    assert any(item["completed"] for item in items)
+
+    notifications = client.get("/api/v1/notifications", headers=headers)
+    assert notifications.status_code == 200
+    assert len(notifications.json()) == 12
+
+    apple = next(plant for plant in plants.json() if plant["name"] == "Яблоня «Боровица»")
+    diagnoses = client.get(f"/api/v1/plants/{apple['id']}/diagnoses", headers=headers)
+    assert diagnoses.status_code == 200
+    history = diagnoses.json()
+    assert len(history) == 1
+    assert len(history[0]["result"]["possible_causes"]) == 3
+    assert history[0]["current_revision"] == 2
+
+    diagnosed = sum(
+        1 for plant in plants.json()
+        if client.get(f"/api/v1/plants/{plant['id']}/diagnoses", headers=headers).json()
+    )
+    assert diagnosed == 12
 
     # Повторный вход возвращает тот же аккаунт и не плодит сады
     repeat = client.post("/api/v1/auth/demo-login")
@@ -116,7 +152,9 @@ def test_demo_login_creates_verified_user_with_seed_data_and_is_idempotent(clien
     repeat_profile = client.get("/api/v1/users/me", headers=repeat_headers)
     assert repeat_profile.json()["email"] == "demo@ai-garden.local"
     repeat_gardens = client.get("/api/v1/gardens", headers=repeat_headers)
-    assert len(repeat_gardens.json()) == 4
+    assert len(repeat_gardens.json()) == 6
+    repeat_plants = client.get("/api/v1/plants", headers=repeat_headers)
+    assert len(repeat_plants.json()) == 31
 
 
 def test_demo_login_is_disabled_in_production(client, monkeypatch):
@@ -211,7 +249,7 @@ def test_public_privacy_config_exposes_only_public_retention_metadata(client, mo
 
 def test_metrics_are_token_protected_and_use_bounded_route_labels(client, monkeypatch):
     token = "metrics-test-token-that-is-longer-than-thirty-two"
-    monkeypatch.setattr(main_module.settings, "metrics_token", token)
+    monkeypatch.setattr(settings, "metrics_token", token)
     client.get("/health")
     assert client.get("/metrics").status_code == 401
     response = client.get("/metrics", headers={"Authorization": f"Bearer {token}"})
@@ -794,7 +832,7 @@ def test_garden_weather_and_calendar_warnings_are_private(client, monkeypatch):
                 ],
             )
 
-    monkeypatch.setattr(main_module, "weather_service", StubWeatherService())
+    monkeypatch.setattr(weather_service, "get_forecast", StubWeatherService().get_forecast)
     weather = client.get(f"/api/v1/gardens/{garden_id}/weather", headers=headers)
     assert weather.status_code == 200
     assert weather.json()["warnings"][0]["kind"] == "frost"
@@ -990,7 +1028,7 @@ def test_gdpr_export_and_account_deletion_remove_private_photo(client):
 
 def test_login_rate_limit(client, monkeypatch):
     register(client, "rate-user@example.com")
-    monkeypatch.setattr(main_module.settings, "auth_rate_limit_attempts", 2)
+    monkeypatch.setattr(settings, "auth_rate_limit_attempts", 2)
     payload = {"email": "rate-user@example.com", "password": "wrong-password"}
     assert client.post("/api/v1/auth/login", json=payload).status_code == 401
     assert client.post("/api/v1/auth/login", json=payload).status_code == 401
@@ -1195,7 +1233,9 @@ def test_admin_manages_verified_semantic_knowledge(client):
 
     listed = client.get("/api/v1/admin/knowledge/sources", headers=admin_headers)
     assert listed.status_code == 200
-    assert any(item["id"] == payload["id"] for item in listed.json())
+    listed_source = next(item for item in listed.json() if item["id"] == payload["id"])
+    assert listed_source["chunks"] == 1
+    assert listed_source["embedding_model"] == "local-hash-concepts-v1"
     assert (
         len(
             client.get(
@@ -1222,6 +1262,41 @@ def test_admin_manages_verified_semantic_knowledge(client):
         ).status_code
         == 409
     )
+
+
+def test_knowledge_source_list_makes_constant_number_of_queries(client):
+    admin_headers = register(client, "knowledge-queries@example.com")
+    from sqlalchemy import event
+
+    from app.admin_cli import set_admin
+    from app.database import engine
+
+    assert set_admin("knowledge-queries@example.com", True)
+    synced = client.post("/api/v1/admin/knowledge/sync", headers=admin_headers)
+    assert synced.status_code == 200
+    assert synced.json()["total_sources"] >= 6
+
+    def statements_for(limit: int) -> int:
+        total = 0
+
+        def listener(conn, cursor, statement, parameters, context, executemany) -> None:
+            nonlocal total
+            total += 1
+
+        event.listen(engine, "before_cursor_execute", listener)
+        try:
+            response = client.get(
+                "/api/v1/admin/knowledge/sources",
+                headers=admin_headers,
+                params={"limit": limit},
+            )
+        finally:
+            event.remove(engine, "before_cursor_execute", listener)
+        assert response.status_code == 200
+        assert len(response.json()) == limit
+        return total
+
+    assert statements_for(2) == statements_for(6)
 
 
 def test_partner_catalog_recommendations_and_idempotent_leads(client):
@@ -2191,6 +2266,79 @@ def test_manual_invoice_payment_creates_audited_payment_record(client):
     )
 
 
+def test_inline_invoice_delivery_failure_returns_bad_gateway(client, monkeypatch):
+    admin_headers = register(client, "failed-delivery-admin@example.com")
+    from app.admin_cli import set_admin
+
+    assert set_admin("failed-delivery-admin@example.com", True)
+    partner = client.post(
+        "/api/v1/admin/partners",
+        headers=admin_headers,
+        json={
+            "name": "Failed Delivery Partner",
+            "website_url": "https://failed-delivery.example.com",
+            "billing_plan": "business",
+            "monthly_fee_cents": 1200,
+            "billing_currency": "eur",
+            "legal_name": "Failed Delivery Partner SIA",
+            "registration_number": "40209111111",
+            "billing_address": "Rada iela 2, Riga",
+            "billing_email": "billing@failed-delivery.example.com",
+        },
+    ).json()
+    today = datetime.now(UTC).date()
+    period_start = today.replace(day=1)
+    period_end = (
+        period_start.replace(year=period_start.year + 1, month=1)
+        if period_start.month == 12
+        else period_start.replace(month=period_start.month + 1)
+    )
+    invoice = client.post(
+        f"/api/v1/admin/partners/{partner['id']}/invoices",
+        headers=admin_headers,
+        json={
+            "period_start": period_start.isoformat(),
+            "period_end": period_end.isoformat(),
+            "due_days": 14,
+        },
+    ).json()
+
+    def fail_delivery(*args, **kwargs):
+        raise RuntimeError("smtp unreachable")
+
+    monkeypatch.setattr(
+        "app.services.invoice_delivery_service.send_invoice_email",
+        fail_delivery,
+    )
+    failed = client.post(
+        f"/api/v1/admin/partner-invoices/{invoice['id']}/send",
+        headers=admin_headers,
+        json={},
+    )
+    assert failed.status_code == 502
+    assert failed.json()["detail"] == "Не удалось отправить счёт"
+    deliveries = client.get(
+        f"/api/v1/admin/partner-invoices/{invoice['id']}/deliveries",
+        headers=admin_headers,
+    ).json()
+    assert [item["status"] for item in deliveries] == ["failed"]
+    assert deliveries[0]["error_type"] == "RuntimeError"
+
+    # Неудачная попытка не считается отправкой: повтор доступен без confirm_resend.
+    monkeypatch.setattr(
+        "app.services.invoice_delivery_service.send_invoice_email",
+        lambda *args, **kwargs: "logged",
+    )
+    retried = client.post(
+        f"/api/v1/admin/partner-invoices/{invoice['id']}/send",
+        headers=admin_headers,
+        json={},
+    )
+    assert retried.status_code == 201
+    assert retried.json()["attempt_number"] == 2
+    assert retried.json()["status"] == "logged"
+
+
 def test_b2b_invoice_endpoints_are_hidden_when_feature_is_disabled(client, monkeypatch):
     admin_headers = register(client, "disabled-invoicing-admin@example.com")
     from app.admin_cli import set_admin
@@ -2458,7 +2606,7 @@ def test_background_diagnosis_job_completes_and_is_idempotent(client):
 
     from app.services.diagnosis_job_service import process_diagnosis_job
 
-    assert process_diagnosis_job(job["id"], gateway=main_module.ai_gateway) == job["diagnosis_id"]
+    assert process_diagnosis_job(job["id"], gateway=gateway_module.ai_gateway) == job["diagnosis_id"]
     with SessionLocal() as db:
         assert len(list(db.scalars(select(Diagnosis)))) == 1
 
@@ -2476,7 +2624,9 @@ def test_background_job_applies_and_audits_deterministic_safety_policy(client, m
         headers=headers,
         files=[("files", ("leaf.jpg", image_bytes(), "image/jpeg"))],
     ).json()[0]["id"]
-    monkeypatch.setattr(main_module, "dispatch_diagnosis_job", lambda *_args, **_kwargs: "queued")
+    monkeypatch.setattr(
+        task_queue_module, "dispatch_diagnosis_job", lambda *_args, **_kwargs: "queued"
+    )
     job = client.post(
         "/api/v1/diagnoses/async",
         headers=headers,
@@ -2493,11 +2643,11 @@ def test_background_job_applies_and_audits_deterministic_safety_policy(client, m
     from app.services.diagnosis_job_service import process_diagnosis_job
 
     class UnsafeGateway:
-        model_name = main_module.ai_gateway.model_name
-        prompt_version = main_module.ai_gateway.prompt_version
+        model_name = gateway_module.ai_gateway.model_name
+        prompt_version = gateway_module.ai_gateway.prompt_version
 
         def analyze(self, *args, **kwargs):
-            analysis = main_module.ai_gateway.analyze(*args, **kwargs)
+            analysis = gateway_module.ai_gateway.analyze(*args, **kwargs)
             result = analysis.result.model_copy(
                 update={
                     "safe_actions": [
@@ -2532,7 +2682,9 @@ def test_diagnosis_job_lease_prevents_two_paid_ai_calls(client, monkeypatch):
         headers=headers,
         files=[("files", ("leaf.jpg", image_bytes(), "image/jpeg"))],
     ).json()[0]["id"]
-    monkeypatch.setattr(main_module, "dispatch_diagnosis_job", lambda *_args, **_kwargs: "queued")
+    monkeypatch.setattr(
+        task_queue_module, "dispatch_diagnosis_job", lambda *_args, **_kwargs: "queued"
+    )
     job = client.post(
         "/api/v1/diagnoses/async",
         headers=headers,
@@ -2549,8 +2701,8 @@ def test_diagnosis_job_lease_prevents_two_paid_ai_calls(client, monkeypatch):
     count_lock = Lock()
 
     class BlockingGateway:
-        model_name = main_module.ai_gateway.model_name
-        prompt_version = main_module.ai_gateway.prompt_version
+        model_name = gateway_module.ai_gateway.model_name
+        prompt_version = gateway_module.ai_gateway.prompt_version
 
         def __init__(self):
             self.calls = 0
@@ -2560,7 +2712,7 @@ def test_diagnosis_job_lease_prevents_two_paid_ai_calls(client, monkeypatch):
                 self.calls += 1
             entered.set()
             assert release.wait(5)
-            return main_module.ai_gateway.analyze(*args, **kwargs)
+            return gateway_module.ai_gateway.analyze(*args, **kwargs)
 
     from app.services.diagnosis_job_service import process_diagnosis_job
 
@@ -2586,8 +2738,10 @@ def test_queued_jobs_count_toward_monthly_quota(client, monkeypatch):
         headers=headers,
         files=[("files", ("leaf.jpg", image_bytes(), "image/jpeg"))],
     ).json()[0]["id"]
-    monkeypatch.setattr(main_module.settings, "free_diagnoses_per_month", 1)
-    monkeypatch.setattr(main_module, "dispatch_diagnosis_job", lambda *_args, **_kwargs: "queued")
+    monkeypatch.setattr(settings, "free_diagnoses_per_month", 1)
+    monkeypatch.setattr(
+        task_queue_module, "dispatch_diagnosis_job", lambda *_args, **_kwargs: "queued"
+    )
     payload = {
         "plant_id": plant["id"],
         "symptoms": "На листьях появились заметные изменения",
@@ -2607,7 +2761,9 @@ def test_background_job_retries_transient_provider_errors(client, monkeypatch):
         headers=headers,
         files=[("files", ("leaf.jpg", image_bytes(), "image/jpeg"))],
     ).json()[0]["id"]
-    monkeypatch.setattr(main_module, "dispatch_diagnosis_job", lambda *_args, **_kwargs: "queued")
+    monkeypatch.setattr(
+        task_queue_module, "dispatch_diagnosis_job", lambda *_args, **_kwargs: "queued"
+    )
     job_id = client.post(
         "/api/v1/diagnoses/async",
         headers=headers,
@@ -2790,7 +2946,7 @@ def test_photo_quota_reservation_locks_user_row(monkeypatch):
 
     with SessionLocal() as db:
         recorder = RecordingSession(db)
-        main_module._reserve_photo_storage(recorder, user_id=1, incoming_bytes=10)
+        reserve_photo_storage(recorder, user_id=1, incoming_bytes=10)
     lock_statement, sum_statement = recorder.scalar_statements
     compiled_lock = str(lock_statement.compile(dialect=postgresql.dialect()))
     assert "FOR UPDATE" in compiled_lock
@@ -2799,7 +2955,7 @@ def test_photo_quota_reservation_locks_user_row(monkeypatch):
 
     monkeypatch.setattr(settings, "user_storage_quota_mb", 0)
     with SessionLocal() as db, pytest.raises(HTTPException) as failure:
-        main_module._reserve_photo_storage(db, user_id=1, incoming_bytes=1)
+        reserve_photo_storage(db, user_id=1, incoming_bytes=1)
     assert failure.value.status_code == 413
 
 
@@ -2968,7 +3124,7 @@ def test_ai_timeout_returns_504_and_is_audited(client, monkeypatch):
                 response_ms=60_000,
             )
 
-    monkeypatch.setattr(main_module, "ai_gateway", TimeoutGateway())
+    monkeypatch.setattr(gateway_module, "ai_gateway", TimeoutGateway())
     response = client.post(
         "/api/v1/diagnoses",
         headers=headers,

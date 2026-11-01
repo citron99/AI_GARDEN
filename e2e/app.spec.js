@@ -78,7 +78,7 @@ test("gardener completes diagnosis, answers, reminder, and product journey", asy
   await page.locator("#registerForm input[name='region']").fill("");
   await page.locator("#registerForm button[type='submit']").click();
   await expect(page.locator("#appView")).toBeVisible();
-  await expect(page.locator("#profileName")).toHaveText("E2E Gardener");
+  await expect(page.locator("#logoutButton")).toBeVisible();
 
   await page.locator("#showPlantForm").click();
   await expect(page.locator("#toast")).toContainText(

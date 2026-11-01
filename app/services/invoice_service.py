@@ -151,14 +151,12 @@ def _party_lines(title: str, snapshot: dict[str, str | None]) -> list[str]:
 
 
 def render_invoice_pdf(invoice: PartnerInvoice, app_settings: Settings) -> bytes:
-    if not all(
-        (
-            invoice.invoice_number,
-            invoice.issuer_snapshot,
-            invoice.customer_snapshot,
-            invoice.line_items is not None,
-            invoice.document_version,
-        )
+    if (
+        not invoice.invoice_number
+        or not invoice.issuer_snapshot
+        or not invoice.customer_snapshot
+        or invoice.line_items is None
+        or not invoice.document_version
     ):
         raise InvoiceDocumentError(
             "Для старого счёта отсутствует неизменяемый снимок документа"
@@ -372,17 +370,15 @@ def load_verified_invoice_pdf(invoice: PartnerInvoice, app_settings: Settings) -
 def render_invoice_cancellation_pdf(
     invoice: PartnerInvoice, app_settings: Settings
 ) -> bytes:
-    if not all(
-        (
-            invoice.invoice_number,
-            invoice.cancellation_number,
-            invoice.cancellation_reason,
-            invoice.cancellation_document_version,
-            invoice.cancelled_at,
-            invoice.issuer_snapshot,
-            invoice.customer_snapshot,
-            invoice.line_items is not None,
-        )
+    if (
+        not invoice.invoice_number
+        or not invoice.cancellation_number
+        or not invoice.cancellation_reason
+        or not invoice.cancellation_document_version
+        or not invoice.cancelled_at
+        or not invoice.issuer_snapshot
+        or not invoice.customer_snapshot
+        or invoice.line_items is None
     ):
         raise InvoiceDocumentError(
             "Для аннулированного счёта отсутствует неизменяемый снимок документа"

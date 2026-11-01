@@ -49,8 +49,28 @@ extend-immutable-calls = [
 # Тесты: assert и тестовые секреты допустимы
 "tests/**" = ["S101", "S105", "S106", "S107"]
 # Сравнения date.today() с колонками типа Date (без времени) — корректны
-"app/catalog.py" = ["DTZ011"]
+"app/routers/partner_*.py" = ["DTZ011"]
 "app/services/**" = ["DTZ011"]
+
+[tool.mypy]
+python_version = "3.12"
+files = ["app"]
+ignore_missing_imports = true
+# Рэтчет: эти два кода отключены глобально, потому что в данной схеме они дают в основном
+# ложные срабатывания — Session.get()/db.scalar() объявлены как Optional, хотя FK с
+# ON DELETE CASCADE гарантирует строку (union-attr), а строки, уже провалидированные pydantic,
+# mypy не может сопоставить с Literal-полями сторонних SDK (arg-type).
+disable_error_code = ["union-attr", "arg-type"]
+
+[[tool.mypy.overrides]]
+# pydantic-settings читает обязательные поля из окружения/.env, поэтому Settings() без аргументов корректен
+module = "app.config"
+disable_error_code = ["union-attr", "arg-type", "call-arg"]
+
+[[tool.mypy.overrides]]
+# Стабы Pillow не экспортируют псевдоним Image.BICUBIC; openai SDK не выводит точную форму input для Responses API
+module = ["app.services.demo_seed", "app.ai.providers.openai_multimodal"]
+disable_error_code = ["union-attr", "arg-type", "attr-defined", "assignment", "misc", "list-item"]
 
 [tool.pytest.ini_options]
 timeout = 90

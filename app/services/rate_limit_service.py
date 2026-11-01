@@ -31,7 +31,7 @@ def enforce_rate_limit(
             from redis import Redis
 
             client = Redis.from_url(settings.celery_broker_url, socket_connect_timeout=1, socket_timeout=1)
-            count = client.incr(key)
+            count = int(client.incr(key))
             if count == 1:
                 client.expire(key, window)
             if count > limit:
