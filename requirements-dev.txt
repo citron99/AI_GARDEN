@@ -6,3 +6,4 @@ httpx2==2.7.0
 pip-audit==2.10.1
 ruff==0.15.20
 pip>=26.2
+mypy==1.18.2

@@ -38,7 +38,7 @@
 
 | Job | Что делает |
 |---|---|
-| `test` | `pip-audit`, `ruff check`, `pytest -q -o timeout_method=signal` (signal-метод — без оверхеда thread-метода на Linux) |
+| `test` | `pip-audit`, `ruff check`, `mypy` (рэтчет по `app/`, конфиг в `pyproject.toml`), `pytest -q -o timeout_method=signal` (signal-метод — без оверхеда thread-метода на Linux) |
 | `browser-e2e` | Playwright (chromium), артефакт отчёта при падении |
 | `docker-smoke` | сборка образа, подъём с `AI_PROVIDER=mock`, проверка `/health` |
 | `postgres-migrations` | реальный pgvector: `alembic upgrade head → check → downgrade base` + тесты конкуренции lease |
@@ -62,7 +62,7 @@ docker-compose -f compose.yaml up -d --build
 # API health: http://127.0.0.1:8000/health
 ```
 
-Локальная разработка: `.venv\Scripts\python.exe`, `pytest -q`, `ruff check app tests migrations evals`.
+Локальная разработка: `.venv\Scripts\python.exe`, `pytest -q`, `ruff check app tests migrations evals`, `mypy`. Правила для контрибьюторов — `CONTRIBUTING.md`.
 
 ## 9. Известные ограничения
 

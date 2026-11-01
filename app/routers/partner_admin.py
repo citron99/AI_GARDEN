@@ -1,47 +1,33 @@
-import csv
-import hmac
 import logging
 import re
-import secrets
 from datetime import UTC, date, datetime, timedelta
-from io import StringIO
-from uuid import uuid4
+from typing import Any
 
 from fastapi import (
     APIRouter,
     Depends,
-    File,
-    Header,
     HTTPException,
     Query,
     Response,
-    UploadFile,
 )
-from fastapi.responses import RedirectResponse
-from pydantic import ValidationError
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.auth import get_admin_user, get_current_user
+from app.auth import get_admin_user
 from app.catalog_taxonomy import (
-    country_code_from_region,
     normalize_alias,
-    resolve_catalog_code,
 )
 from app.config import settings
 from app.database import get_db
 from app.models import (
     AdminAuditLog,
     CatalogTaxonomyAlias,
-    Diagnosis,
-    Garden,
     Partner,
     PartnerInvoice,
     PartnerInvoiceDelivery,
     PartnerMember,
     PartnerPayment,
-    Plant,
     Product,
     ProductLead,
     ProductRecommendationRule,
@@ -54,33 +40,23 @@ from app.schemas import (
     AdminProductRead,
     CatalogTaxonomyAliasCreate,
     CatalogTaxonomyAliasRead,
-    PartnerAccountRead,
-    PartnerConversionClaim,
-    PartnerConversionPostback,
     PartnerCreate,
     PartnerInvoiceCreate,
     PartnerInvoiceDeliveryRead,
     PartnerInvoiceRead,
     PartnerInvoiceSend,
     PartnerInvoiceStatusUpdate,
-    PartnerLeadRead,
     PartnerManualPaymentCreate,
     PartnerMemberAssign,
     PartnerMemberRead,
-    PartnerOverviewRead,
     PartnerPaymentImport,
     PartnerPaymentImportRead,
     PartnerPaymentRead,
     PartnerPaymentResolve,
-    PartnerPostbackKeyRead,
-    PartnerProductCreate,
     PartnerRead,
     PartnerUpdate,
     ProductCreate,
-    ProductLeadCreate,
-    ProductLeadRead,
     ProductModerationUpdate,
-    ProductRead,
     ProductRecommendationRuleCreate,
     ProductRecommendationRuleRead,
     ProductUpdate,
@@ -98,18 +74,16 @@ from app.services.invoice_service import (
     document_sha256,
     invoice_pdf_generator_version,
     invoice_snapshot_sha256,
-    load_verified_invoice_cancellation_pdf,
     load_verified_invoice_pdf,
     render_invoice_cancellation_pdf,
     render_invoice_pdf,
 )
-from app.services.partner_attribution_service import (
-    AttributionTokenError,
-    add_click_id,
-    hash_partner_key,
-    lead_idempotency_key,
-    sign_click_id,
-    verify_click_token,
+from app.services.partner_catalog_service import (
+    invoice_cancellation_pdf_response,
+    invoice_pdf_response,
+    member_dict,
+    product_dict,
+    require_b2b_invoicing,
 )
 from app.services.product_registry_service import import_registration_snapshot
 from app.services.storage_service import (
@@ -117,425 +91,11 @@ from app.services.storage_service import (
     store_private_document,
 )
 
+router = APIRouter(prefix="/api/v1")
+
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/v1")
-public_router = APIRouter()
 INVOICE_NUMBER_PATTERN = re.compile(r"\bAG-\d{4}-\d{8}\b", re.IGNORECASE)
-
-
-def _require_b2b_invoicing() -> None:
-    if not settings.b2b_invoicing_enabled:
-        raise HTTPException(404, "Модуль B2B-счетов отключён")
-
-
-def _product_dict(product: Product, partner_name: str) -> dict:
-    return {
-        "id": product.id,
-        "partner_id": product.partner_id,
-        "name": product.name,
-        "sku": product.sku,
-        "category": product.category,
-        "description": product.description,
-        "product_url": product.product_url,
-        "image_url": product.image_url,
-        "price_cents": product.price_cents,
-        "currency": product.currency,
-        "in_stock": product.in_stock,
-        "regions": product.regions or [],
-        "partner_name": partner_name,
-        "active": product.active,
-        "moderation_status": product.moderation_status,
-        "created_at": product.created_at,
-        "commercial_label": "Реклама партнёра",
-    }
-
-
-def _lead_dict(lead: ProductLead) -> dict:
-    if not lead.click_id:
-        raise HTTPException(409, "Для старого перехода отсутствует click ID")
-    return {
-        "id": lead.id,
-        "product_id": lead.product_id,
-        "diagnosis_id": lead.diagnosis_id,
-        "source": lead.source,
-        "status": lead.status,
-        "redirect_url": f"/product/go/{sign_click_id(lead.click_id)}",
-        "created_at": lead.created_at,
-    }
-
-
-def _region_matches(product: Product, region: str | None) -> bool:
-    if not product.regions or not region:
-        return True
-    normalized = region.casefold()
-    region_country = country_code_from_region(region)
-    return any(
-        (
-            region_country is not None
-            and country_code_from_region(item) == region_country
-        )
-        or item.casefold() in normalized
-        or normalized in item.casefold()
-        for item in product.regions
-    )
-
-
-def _member_dict(member: PartnerMember, partner: Partner, user: User) -> dict:
-    return {
-        "id": member.id,
-        "partner_id": partner.id,
-        "partner_name": partner.name,
-        "user_id": user.id,
-        "email": user.email,
-        "name": user.name,
-        "role": member.role,
-        "active": member.active,
-        "created_at": member.created_at,
-    }
-
-
-def get_partner_member(
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-) -> PartnerMember:
-    member = db.scalar(
-        select(PartnerMember)
-        .join(Partner)
-        .where(
-            PartnerMember.user_id == user.id,
-            PartnerMember.active.is_(True),
-            Partner.active.is_(True),
-        )
-    )
-    if not member:
-        raise HTTPException(403, "Нет доступа к кабинету партнёра")
-    return member
-
-
-def _require_product_manager(member: PartnerMember) -> None:
-    if member.role not in {"owner", "editor"}:
-        raise HTTPException(403, "Недостаточно прав для управления товарами")
-
-
-@router.get("/catalog/products", response_model=list[ProductRead])
-def catalog_products(
-    category: str | None = None,
-    region: str | None = Query(default=None, max_length=120),
-    offset: int = Query(default=0, ge=0),
-    limit: int = Query(default=50, ge=1, le=100),
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-) -> list[dict]:
-    query = (
-        select(Product, Partner.name)
-        .join(Partner)
-        .where(
-            Product.active.is_(True),
-            Product.moderation_status == "approved",
-            Partner.active.is_(True),
-        )
-    )
-    if category:
-        query = query.where(Product.category == category)
-    rows = db.execute(query.order_by(Product.id.desc()).limit(200)).all()
-    selected_region = region or user.region
-    matching = [
-        _product_dict(product, partner_name)
-        for product, partner_name in rows
-        if _region_matches(product, selected_region)
-    ]
-    return matching[offset : offset + limit]
-
-
-@router.get(
-    "/recommendations/{diagnosis_id}/products", response_model=list[ProductRead]
-)
-def recommendation_products(
-    diagnosis_id: int,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-) -> list[dict]:
-    diagnosis = db.scalar(
-        select(Diagnosis)
-        .join(Plant)
-        .join(Garden)
-        .where(Diagnosis.id == diagnosis_id, Garden.user_id == user.id)
-    )
-    if not diagnosis:
-        raise HTTPException(404, "Диагностика не найдена")
-    if diagnosis.result.get("analysis_outcome") != "possible_problem":
-        return []
-    plant = db.get(Plant, diagnosis.plant_id)
-    cause_names = {
-        str(item.get("name", "")).strip().casefold()
-        for item in diagnosis.result.get("possible_causes", [])
-        if item.get("name") and item.get("confidence") in {"high", "medium"}
-    }
-    cause_codes = {
-        str(item.get("cause_code", "")).strip().lower()
-        for item in diagnosis.result.get("possible_causes", [])
-        if item.get("cause_code") and item.get("confidence") in {"high", "medium"}
-    }
-    if not cause_names and not cause_codes:
-        return []
-    region_value = (plant.region or user.region or "").strip()
-    region = region_value.casefold()
-    country_code = resolve_catalog_code(db, "country", region_value, user.language)
-    crop = (plant.species or plant.name).strip().casefold()
-    taxon_id = (
-        plant.taxon_id.lower()
-        if plant.taxon_id
-        else resolve_catalog_code(
-            db, "plant", plant.species or plant.name, user.language
-        )
-    )
-    for cause_name in cause_names:
-        resolved = resolve_catalog_code(db, "problem", cause_name, user.language)
-        if resolved:
-            cause_codes.add(resolved)
-    rows = db.execute(
-        select(Product, Partner.name, ProductRecommendationRule)
-        .join(Partner, Partner.id == Product.partner_id)
-        .join(
-            ProductRecommendationRule,
-            ProductRecommendationRule.product_id == Product.id,
-        )
-        .outerjoin(
-            RegulatedProductRegistration,
-            RegulatedProductRegistration.id
-            == ProductRecommendationRule.registry_entry_id,
-        )
-        .where(
-            Product.active.is_(True),
-            Product.in_stock.is_(True),
-            Product.moderation_status == "approved",
-            Product.category.in_(("tools", "irrigation")),
-            Partner.active.is_(True),
-            ProductRecommendationRule.active.is_(True),
-            ProductRecommendationRule.expert_verified.is_(True),
-            or_(
-                ProductRecommendationRule.registry_entry_id.is_(None),
-                and_(
-                    RegulatedProductRegistration.status == "active",
-                    or_(
-                        RegulatedProductRegistration.valid_until.is_(None),
-                        RegulatedProductRegistration.valid_until >= date.today(),
-                    ),
-                ),
-            ),
-            (
-                ProductRecommendationRule.registration_expires_on.is_(None)
-                | (ProductRecommendationRule.registration_expires_on >= date.today())
-            ),
-        )
-        .order_by(Product.id.desc())
-        .limit(200)
-    ).all()
-    selected: list[dict] = []
-    seen: set[int] = set()
-    for product, partner_name, rule in rows:
-        rule_crop = rule.crop_name.casefold()
-        rule_problem = rule.problem_name.casefold()
-        rule_region = rule.region_code.casefold()
-        crop_matches = (
-            taxon_id is not None and taxon_id == rule.plant_taxon_id
-            if rule.plant_taxon_id
-            else rule_crop == "*" or rule_crop in crop or crop in rule_crop
-        )
-        problem_matches = (
-            rule.problem_code in cause_codes
-            if rule.problem_code
-            else rule_problem == "*"
-            or any(
-                rule_problem in cause or cause in rule_problem for cause in cause_names
-            )
-        )
-        region_matches = (
-            country_code is not None and country_code == rule.country_code
-            if rule.country_code
-            else rule_region == "*"
-            or (region and (rule_region in region or region in rule_region))
-        )
-        if (
-            product.id not in seen
-            and crop_matches
-            and problem_matches
-            and region_matches
-            and _region_matches(product, region)
-        ):
-            selected.append(_product_dict(product, partner_name))
-            seen.add(product.id)
-    return selected[:10]
-
-
-@router.post(
-    "/products/{product_id}/lead", response_model=ProductLeadRead, status_code=201
-)
-def create_product_lead(
-    product_id: int,
-    payload: ProductLeadCreate,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-) -> dict:
-    product = db.scalar(
-        select(Product)
-        .join(Partner)
-        .where(
-            Product.id == product_id,
-            Product.active.is_(True),
-            Product.moderation_status == "approved",
-            Partner.active.is_(True),
-        )
-    )
-    if not product:
-        raise HTTPException(404, "Товар не найден")
-    if payload.diagnosis_id is not None:
-        owned = db.scalar(
-            select(Diagnosis.id)
-            .join(Plant)
-            .join(Garden)
-            .where(Diagnosis.id == payload.diagnosis_id, Garden.user_id == user.id)
-        )
-        if not owned:
-            raise HTTPException(404, "Диагностика не найдена")
-    idempotency_key = lead_idempotency_key(user.id, product.id, payload.diagnosis_id)
-    existing = db.scalar(
-        select(ProductLead).where(
-            ProductLead.idempotency_key == idempotency_key,
-        )
-    )
-    if existing:
-        return _lead_dict(existing)
-    lead = ProductLead(
-        user_id=user.id,
-        product_id=product.id,
-        diagnosis_id=payload.diagnosis_id,
-        click_id=str(uuid4()),
-        idempotency_key=idempotency_key,
-        source="diagnosis" if payload.diagnosis_id is not None else "catalog",
-    )
-    db.add(lead)
-    try:
-        db.commit()
-    except IntegrityError:
-        db.rollback()
-        lead = db.scalar(
-            select(ProductLead).where(
-                ProductLead.idempotency_key == idempotency_key,
-            )
-        )
-        if not lead:
-            raise
-        return _lead_dict(lead)
-    db.refresh(lead)
-    return _lead_dict(lead)
-
-
-@public_router.get("/product/go/{signed_click_id}", include_in_schema=False)
-def product_redirect(
-    signed_click_id: str, db: Session = Depends(get_db)
-) -> RedirectResponse:
-    try:
-        click_id = verify_click_token(signed_click_id)
-    except AttributionTokenError as exc:
-        raise HTTPException(404, "Переход недействителен или устарел") from exc
-    row = db.execute(
-        select(ProductLead, Product, Partner)
-        .join(Product, Product.id == ProductLead.product_id)
-        .join(Partner, Partner.id == Product.partner_id)
-        .where(
-            ProductLead.click_id == click_id,
-            Product.active.is_(True),
-            Product.moderation_status == "approved",
-            Partner.active.is_(True),
-        )
-        .with_for_update()
-    ).one_or_none()
-    if not row:
-        raise HTTPException(404, "Переход недействителен или устарел")
-    lead, product, _partner = row
-    lead.redirected_at = datetime.now(UTC)
-    lead.redirect_count = (lead.redirect_count or 0) + 1
-    db.commit()
-    return RedirectResponse(
-        add_click_id(product.product_url, signed_click_id), status_code=302
-    )
-
-
-@router.post("/partner/postback-key", response_model=PartnerPostbackKeyRead)
-def rotate_partner_postback_key(
-    member: PartnerMember = Depends(get_partner_member),
-    db: Session = Depends(get_db),
-) -> dict:
-    if member.role != "owner":
-        raise HTTPException(403, "Только владелец может обновить postback key")
-    partner = db.get(Partner, member.partner_id)
-    api_key = secrets.token_urlsafe(40)
-    partner.postback_secret_hash = hash_partner_key(api_key)
-    db.commit()
-    return {"api_key": api_key}
-
-
-@router.post("/partner/conversions/postback", response_model=PartnerLeadRead)
-def partner_conversion_postback(
-    payload: PartnerConversionPostback,
-    partner_key: str | None = Header(default=None, alias="X-Partner-Key"),
-    db: Session = Depends(get_db),
-) -> dict:
-    try:
-        click_id = verify_click_token(payload.signed_click_id)
-    except AttributionTokenError as exc:
-        raise HTTPException(404, "Переход не найден") from exc
-    row = db.execute(
-        select(ProductLead, Product, Partner)
-        .join(Product, Product.id == ProductLead.product_id)
-        .join(Partner, Partner.id == Product.partner_id)
-        .where(ProductLead.click_id == click_id)
-        .with_for_update()
-    ).one_or_none()
-    if not row:
-        raise HTTPException(404, "Переход не найден")
-    lead, product, partner = row
-    supplied_hash = hash_partner_key(partner_key or "")
-    if not partner.postback_secret_hash or not hmac.compare_digest(
-        supplied_hash,
-        partner.postback_secret_hash,
-    ):
-        raise HTTPException(401, "Некорректный partner key")
-    if lead.redirected_at is None:
-        raise HTTPException(409, "Переход ещё не был зарегистрирован")
-    if lead.status not in {"clicked", "rejected"} or lead.invoice_id is not None:
-        raise HTTPException(409, "Конверсия уже обрабатывается или включена в счёт")
-    lead.status = "conversion_claimed"
-    lead.partner_reference = payload.partner_reference
-    lead.conversion_value_cents = payload.conversion_value_cents
-    lead.claimed_at = datetime.now(UTC)
-    lead.confirmed_at = None
-    lead.rejected_at = None
-    lead.review_note = None
-    lead.reviewed_by_admin_id = None
-    lead.billable_amount_cents = 0
-    try:
-        db.commit()
-    except IntegrityError:
-        db.rollback()
-        raise HTTPException(409, "Такая ссылка на продажу уже использована для товара")
-    db.refresh(lead)
-    return {
-        "id": lead.id,
-        "product_id": lead.product_id,
-        "product_name": product.name,
-        "source": lead.source,
-        "status": lead.status,
-        "partner_reference": lead.partner_reference,
-        "conversion_value_cents": lead.conversion_value_cents,
-        "billable_amount_cents": lead.billable_amount_cents,
-        "claimed_at": lead.claimed_at,
-        "confirmed_at": lead.confirmed_at,
-        "created_at": lead.created_at,
-    }
-
 
 @router.get("/admin/partners", response_model=list[PartnerRead])
 def admin_partners(
@@ -566,7 +126,7 @@ def admin_partner_members(
         .offset(offset)
         .limit(limit)
     ).all()
-    return [_member_dict(member, partner, user) for member, partner, user in rows]
+    return [member_dict(member, partner, user) for member, partner, user in rows]
 
 
 @router.post(
@@ -603,7 +163,7 @@ def assign_partner_member(
         db.add(member)
     db.commit()
     db.refresh(member)
-    return _member_dict(member, partner, user)
+    return member_dict(member, partner, user)
 
 
 @router.delete("/admin/partner-members/{member_id}", status_code=204)
@@ -689,7 +249,7 @@ def admin_products(
         .offset(offset)
         .limit(limit)
     ).all()
-    return [_product_dict(product, partner_name) for product, partner_name in rows]
+    return [product_dict(product, partner_name) for product, partner_name in rows]
 
 
 @router.post("/admin/products", response_model=AdminProductRead, status_code=201)
@@ -713,7 +273,7 @@ def create_product(
         db.rollback()
         raise HTTPException(409, "SKU товара уже используется этим партнёром")
     db.refresh(product)
-    return _product_dict(product, partner.name)
+    return product_dict(product, partner.name)
 
 
 @router.patch("/admin/products/{product_id}", response_model=AdminProductRead)
@@ -757,7 +317,7 @@ def update_product(
     partner_name = db.scalar(
         select(Partner.name).where(Partner.id == product.partner_id)
     )
-    return _product_dict(product, partner_name)
+    return product_dict(product, partner_name)
 
 
 @router.patch(
@@ -789,7 +349,7 @@ def moderate_product(
     partner_name = db.scalar(
         select(Partner.name).where(Partner.id == product.partner_id)
     )
-    return _product_dict(product, partner_name)
+    return product_dict(product, partner_name)
 
 
 @router.post(
@@ -1084,415 +644,6 @@ def admin_leads(
     ]
 
 
-@router.get("/partner/me", response_model=PartnerAccountRead | None)
-def partner_account(
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-) -> dict | None:
-    member = db.scalar(
-        select(PartnerMember)
-        .join(Partner)
-        .where(
-            PartnerMember.user_id == user.id,
-            PartnerMember.active.is_(True),
-            Partner.active.is_(True),
-        )
-    )
-    if member is None:
-        return None
-    partner = db.get(Partner, member.partner_id)
-    return {
-        "partner_id": partner.id,
-        "partner_name": partner.name,
-        "website_url": partner.website_url,
-        "role": member.role,
-        "can_manage_products": member.role in {"owner", "editor"},
-        "billing_plan": partner.billing_plan,
-        "billing_currency": partner.billing_currency,
-    }
-
-
-@router.get("/partner/overview", response_model=PartnerOverviewRead)
-def partner_overview(
-    member: PartnerMember = Depends(get_partner_member),
-    db: Session = Depends(get_db),
-) -> dict:
-    cutoff = datetime.now(UTC) - timedelta(days=30)
-    lead_base = (
-        select(func.count(ProductLead.id))
-        .join(Product)
-        .where(Product.partner_id == member.partner_id)
-    )
-    amount_base = (
-        select(func.coalesce(func.sum(ProductLead.billable_amount_cents), 0))
-        .join(Product)
-        .where(
-            Product.partner_id == member.partner_id,
-            ProductLead.status == "confirmed",
-            ProductLead.invoice_id.is_(None),
-        )
-    )
-    return {
-        "partner_id": member.partner_id,
-        "partner_name": db.scalar(
-            select(Partner.name).where(Partner.id == member.partner_id)
-        ),
-        "active_products": db.scalar(
-            select(func.count(Product.id)).where(
-                Product.partner_id == member.partner_id, Product.active.is_(True)
-            )
-        )
-        or 0,
-        "total_products": db.scalar(
-            select(func.count(Product.id)).where(
-                Product.partner_id == member.partner_id
-            )
-        )
-        or 0,
-        "total_leads": db.scalar(lead_base) or 0,
-        "leads_last_30_days": db.scalar(
-            lead_base.where(ProductLead.created_at >= cutoff)
-        )
-        or 0,
-        "pending_conversion_claims": db.scalar(
-            lead_base.where(ProductLead.status == "conversion_claimed")
-        )
-        or 0,
-        "confirmed_conversions": db.scalar(
-            lead_base.where(ProductLead.status == "confirmed")
-        )
-        or 0,
-        "uninvoiced_amount_cents": db.scalar(amount_base) or 0,
-        "billing_currency": db.scalar(
-            select(Partner.billing_currency).where(Partner.id == member.partner_id)
-        ),
-    }
-
-
-@router.get("/partner/products", response_model=list[AdminProductRead])
-def partner_products(
-    offset: int = Query(default=0, ge=0),
-    limit: int = Query(default=50, ge=1, le=200),
-    member: PartnerMember = Depends(get_partner_member),
-    db: Session = Depends(get_db),
-) -> list[dict]:
-    partner = db.get(Partner, member.partner_id)
-    products = db.scalars(
-        select(Product)
-        .where(Product.partner_id == member.partner_id)
-        .order_by(Product.id.desc())
-        .offset(offset)
-        .limit(limit)
-    ).all()
-    return [_product_dict(product, partner.name) for product in products]
-
-
-def _csv_boolean(value: str | None, *, default: bool = True) -> bool:
-    normalized = (value or "").strip().casefold()
-    if not normalized:
-        return default
-    if normalized in {"1", "true", "yes", "y", "да", "jā"}:
-        return True
-    if normalized in {"0", "false", "no", "n", "нет", "nē"}:
-        return False
-    raise ValueError("in_stock must be true or false")
-
-
-@router.post("/partner/products/import/csv")
-async def import_partner_products_csv(
-    file: UploadFile = File(...),
-    member: PartnerMember = Depends(get_partner_member),
-    db: Session = Depends(get_db),
-) -> dict[str, int]:
-    """Atomically create or update partner products by SKU from a bounded UTF-8 CSV."""
-    _require_product_manager(member)
-    if file.content_type not in {
-        "text/csv",
-        "application/csv",
-        "application/vnd.ms-excel",
-    }:
-        raise HTTPException(415, "Поддерживается только CSV")
-    raw = await file.read(2 * 1024 * 1024 + 1)
-    if len(raw) > 2 * 1024 * 1024:
-        raise HTTPException(413, "CSV-файл слишком большой")
-    try:
-        reader = csv.DictReader(StringIO(raw.decode("utf-8-sig")))
-    except UnicodeDecodeError as exc:
-        raise HTTPException(422, {"message": "CSV must be UTF-8"}) from exc
-    required = {"sku", "name", "category", "product_url"}
-    if not reader.fieldnames or not required.issubset(set(reader.fieldnames)):
-        raise HTTPException(
-            422, {"message": "CSV headers are missing", "required": sorted(required)}
-        )
-
-    payloads: list[PartnerProductCreate] = []
-    for row_number, row in enumerate(reader, start=2):
-        if row_number > 1_001:
-            raise HTTPException(
-                422, {"message": "CSV row limit exceeded", "limit": 1_000}
-            )
-        try:
-            payload = PartnerProductCreate.model_validate(
-                {
-                    "sku": (row.get("sku") or "").strip(),
-                    "name": (row.get("name") or "").strip(),
-                    "category": (row.get("category") or "").strip(),
-                    "description": (row.get("description") or "").strip() or None,
-                    "product_url": (row.get("product_url") or "").strip(),
-                    "image_url": (row.get("image_url") or "").strip() or None,
-                    "price_cents": (row.get("price_cents") or "").strip() or None,
-                    "currency": (row.get("currency") or "eur").strip(),
-                    "in_stock": _csv_boolean(row.get("in_stock")),
-                    "regions": [
-                        value.strip()
-                        for value in (row.get("regions") or "").split("|")
-                        if value.strip()
-                    ],
-                }
-            )
-            if not payload.sku:
-                raise ValueError("sku is required")
-            payloads.append(payload)
-        except (ValidationError, ValueError) as exc:
-            errors = (
-                exc.errors(include_url=False)
-                if isinstance(exc, ValidationError)
-                else [{"type": "value_error", "msg": str(exc)}]
-            )
-            raise HTTPException(
-                422,
-                {
-                    "message": "Invalid CSV row",
-                    "row": row_number,
-                    "errors": errors,
-                },
-            ) from exc
-    if not payloads:
-        raise HTTPException(422, {"message": "CSV contains no products"})
-
-    skus = {payload.sku for payload in payloads}
-    existing = {
-        product.sku: product
-        for product in db.scalars(
-            select(Product).where(
-                Product.partner_id == member.partner_id, Product.sku.in_(skus)
-            )
-        )
-    }
-    created = 0
-    updated = 0
-    for payload in payloads:
-        values = payload.model_dump(mode="json")
-        product = existing.get(payload.sku)
-        if product is None:
-            product = Product(
-                partner_id=member.partner_id, **values, moderation_status="draft"
-            )
-            db.add(product)
-            existing[payload.sku] = product
-            created += 1
-        else:
-            for field, value in values.items():
-                setattr(product, field, value)
-            product.moderation_status = "draft"
-            product.moderation_note = None
-            product.moderated_at = None
-            updated += 1
-    db.add(
-        AdminAuditLog(
-            admin_user_id=member.user_id,
-            action="partner_products.import_csv",
-            target_type="partner",
-            target_id=str(member.partner_id),
-            details={"created": created, "updated": updated},
-        )
-    )
-    try:
-        db.commit()
-    except IntegrityError:
-        db.rollback()
-        raise HTTPException(409, "CSV содержит повторяющийся SKU")
-    return {"created": created, "updated": updated}
-
-
-@router.post("/partner/products", response_model=AdminProductRead, status_code=201)
-def create_partner_product(
-    payload: PartnerProductCreate,
-    member: PartnerMember = Depends(get_partner_member),
-    db: Session = Depends(get_db),
-) -> dict:
-    _require_product_manager(member)
-    partner = db.get(Partner, member.partner_id)
-    product = Product(
-        partner_id=member.partner_id,
-        **payload.model_dump(mode="json"),
-        moderation_status="draft",
-    )
-    db.add(product)
-    try:
-        db.commit()
-    except IntegrityError:
-        db.rollback()
-        raise HTTPException(409, "SKU товара уже используется этим партнёром")
-    db.refresh(product)
-    return _product_dict(product, partner.name)
-
-
-@router.patch("/partner/products/{product_id}", response_model=AdminProductRead)
-def update_partner_product(
-    product_id: int,
-    payload: ProductUpdate,
-    member: PartnerMember = Depends(get_partner_member),
-    db: Session = Depends(get_db),
-) -> dict:
-    _require_product_manager(member)
-    product = db.scalar(
-        select(Product).where(
-            Product.id == product_id, Product.partner_id == member.partner_id
-        )
-    )
-    if not product:
-        raise HTTPException(404, "Товар не найден")
-    changes = payload.model_dump(exclude_unset=True, mode="json")
-    if "partner_id" in changes:
-        raise HTTPException(422, "Нельзя перенести товар в другую организацию")
-    for field, value in changes.items():
-        setattr(product, field, value)
-    if changes.keys() & {
-        "name",
-        "sku",
-        "category",
-        "description",
-        "product_url",
-        "image_url",
-        "price_cents",
-        "currency",
-        "in_stock",
-        "regions",
-    }:
-        product.moderation_status = "draft"
-        product.moderation_note = None
-        product.moderated_at = None
-    try:
-        db.commit()
-    except IntegrityError:
-        db.rollback()
-        raise HTTPException(409, "SKU товара уже используется этим партнёром")
-    db.refresh(product)
-    partner_name = db.scalar(
-        select(Partner.name).where(Partner.id == member.partner_id)
-    )
-    return _product_dict(product, partner_name)
-
-
-@router.post("/partner/products/{product_id}/submit", response_model=AdminProductRead)
-def submit_partner_product(
-    product_id: int,
-    member: PartnerMember = Depends(get_partner_member),
-    db: Session = Depends(get_db),
-) -> dict:
-    _require_product_manager(member)
-    product = db.scalar(
-        select(Product).where(
-            Product.id == product_id, Product.partner_id == member.partner_id
-        )
-    )
-    if not product:
-        raise HTTPException(404, "Товар не найден")
-    if product.moderation_status not in {"draft", "rejected"}:
-        raise HTTPException(409, "Товар уже отправлен на модерацию")
-    product.moderation_status = "pending"
-    product.moderation_note = None
-    db.commit()
-    db.refresh(product)
-    partner_name = db.scalar(
-        select(Partner.name).where(Partner.id == member.partner_id)
-    )
-    return _product_dict(product, partner_name)
-
-
-@router.get("/partner/leads", response_model=list[PartnerLeadRead])
-def partner_leads(
-    offset: int = Query(default=0, ge=0),
-    limit: int = Query(default=100, ge=1, le=200),
-    member: PartnerMember = Depends(get_partner_member),
-    db: Session = Depends(get_db),
-) -> list[dict]:
-    rows = db.execute(
-        select(ProductLead, Product.name)
-        .join(Product, Product.id == ProductLead.product_id)
-        .where(Product.partner_id == member.partner_id)
-        .order_by(ProductLead.created_at.desc())
-        .offset(offset)
-        .limit(limit)
-    ).all()
-    return [
-        {
-            "id": lead.id,
-            "product_id": lead.product_id,
-            "product_name": product_name,
-            "source": lead.source,
-            "status": lead.status,
-            "partner_reference": lead.partner_reference,
-            "conversion_value_cents": lead.conversion_value_cents,
-            "billable_amount_cents": lead.billable_amount_cents,
-            "claimed_at": lead.claimed_at,
-            "confirmed_at": lead.confirmed_at,
-            "created_at": lead.created_at,
-        }
-        for lead, product_name in rows
-    ]
-
-
-@router.post("/partner/leads/{lead_id}/conversion", response_model=PartnerLeadRead)
-def claim_partner_conversion(
-    lead_id: int,
-    payload: PartnerConversionClaim,
-    member: PartnerMember = Depends(get_partner_member),
-    db: Session = Depends(get_db),
-) -> dict:
-    _require_product_manager(member)
-    row = db.execute(
-        select(ProductLead, Product.name)
-        .join(Product, Product.id == ProductLead.product_id)
-        .where(ProductLead.id == lead_id, Product.partner_id == member.partner_id)
-        .with_for_update()
-    ).one_or_none()
-    if not row:
-        raise HTTPException(404, "Переход не найден")
-    lead, product_name = row
-    if lead.status not in {"clicked", "rejected"} or lead.invoice_id is not None:
-        raise HTTPException(409, "Конверсия уже обрабатывается или включена в счёт")
-    lead.status = "conversion_claimed"
-    lead.partner_reference = payload.partner_reference
-    lead.conversion_value_cents = payload.conversion_value_cents
-    lead.claimed_at = datetime.now(UTC)
-    lead.confirmed_at = None
-    lead.rejected_at = None
-    lead.review_note = None
-    lead.reviewed_by_admin_id = None
-    lead.billable_amount_cents = 0
-    try:
-        db.commit()
-    except IntegrityError:
-        db.rollback()
-        raise HTTPException(409, "Такая ссылка на продажу уже использована для товара")
-    db.refresh(lead)
-    return {
-        "id": lead.id,
-        "product_id": lead.product_id,
-        "product_name": product_name,
-        "source": lead.source,
-        "status": lead.status,
-        "partner_reference": lead.partner_reference,
-        "conversion_value_cents": lead.conversion_value_cents,
-        "billable_amount_cents": lead.billable_amount_cents,
-        "claimed_at": lead.claimed_at,
-        "confirmed_at": lead.confirmed_at,
-        "created_at": lead.created_at,
-    }
-
-
 @router.patch("/admin/leads/{lead_id}/conversion", response_model=AdminLeadRead)
 def review_partner_conversion(
     lead_id: int,
@@ -1564,7 +715,7 @@ def create_partner_invoice(
     admin: User = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ) -> PartnerInvoice:
-    _require_b2b_invoicing()
+    require_b2b_invoicing()
     partner = db.scalar(
         select(Partner).where(Partner.id == partner_id).with_for_update()
     )
@@ -1682,7 +833,7 @@ def admin_partner_invoices(
     _admin: User = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ) -> list[PartnerInvoice]:
-    _require_b2b_invoicing()
+    require_b2b_invoicing()
     query = select(PartnerInvoice)
     if partner_id is not None:
         query = query.where(PartnerInvoice.partner_id == partner_id)
@@ -1693,54 +844,17 @@ def admin_partner_invoices(
     )
 
 
-def _invoice_pdf_response(invoice: PartnerInvoice) -> Response:
-    try:
-        document = load_verified_invoice_pdf(invoice, settings)
-    except InvoiceDocumentError as exc:
-        raise HTTPException(409, str(exc)) from exc
-    return Response(
-        content=document,
-        media_type="application/pdf",
-        headers={
-            "Content-Disposition": f'attachment; filename="{invoice.invoice_number}.pdf"',
-            "Cache-Control": "private, no-store",
-            "ETag": f'"{invoice.pdf_sha256}"',
-            "X-Content-Type-Options": "nosniff",
-        },
-    )
-
-
-def _invoice_cancellation_pdf_response(invoice: PartnerInvoice) -> Response:
-    try:
-        document = load_verified_invoice_cancellation_pdf(invoice, settings)
-    except InvoiceDocumentError as exc:
-        status_code = 404 if not invoice.cancellation_number else 409
-        raise HTTPException(status_code, str(exc)) from exc
-    return Response(
-        content=document,
-        media_type="application/pdf",
-        headers={
-            "Content-Disposition": (
-                f'attachment; filename="{invoice.cancellation_number}.pdf"'
-            ),
-            "Cache-Control": "private, no-store",
-            "ETag": f'"{invoice.cancellation_pdf_sha256}"',
-            "X-Content-Type-Options": "nosniff",
-        },
-    )
-
-
 @router.get("/admin/partner-invoices/{invoice_id}/pdf")
 def admin_partner_invoice_pdf(
     invoice_id: int,
     _admin: User = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ) -> Response:
-    _require_b2b_invoicing()
+    require_b2b_invoicing()
     invoice = db.get(PartnerInvoice, invoice_id)
     if not invoice:
         raise HTTPException(404, "Счёт не найден")
-    return _invoice_pdf_response(invoice)
+    return invoice_pdf_response(invoice)
 
 
 @router.get("/admin/partner-invoices/{invoice_id}/cancellation.pdf")
@@ -1749,11 +863,11 @@ def admin_partner_invoice_cancellation_pdf(
     _admin: User = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ) -> Response:
-    _require_b2b_invoicing()
+    require_b2b_invoicing()
     invoice = db.get(PartnerInvoice, invoice_id)
     if not invoice:
         raise HTTPException(404, "Счёт не найден")
-    return _invoice_cancellation_pdf_response(invoice)
+    return invoice_cancellation_pdf_response(invoice)
 
 
 @router.get(
@@ -1765,7 +879,7 @@ def admin_partner_invoice_deliveries(
     _admin: User = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ) -> list[PartnerInvoiceDelivery]:
-    _require_b2b_invoicing()
+    require_b2b_invoicing()
     if not db.get(PartnerInvoice, invoice_id):
         raise HTTPException(404, "Счёт не найден")
     return list(
@@ -1790,7 +904,7 @@ def send_partner_invoice(
     admin: User = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ) -> PartnerInvoiceDelivery:
-    _require_b2b_invoicing()
+    require_b2b_invoicing()
     invoice = db.scalar(
         select(PartnerInvoice)
         .where(
@@ -1859,10 +973,9 @@ def send_partner_invoice(
         # The persisted pending row is the outbox record. Celery beat can safely
         # republish it; duplicate task delivery is guarded by an atomic claim.
         logger.exception("Не удалось синхронно отправить счёт %s", delivery.id)
-    delivery = db.get(PartnerInvoiceDelivery, delivery.id)
+    db.refresh(delivery)
     if delivery.status == "failed" and settings.diagnosis_execution_mode != "celery":
         raise HTTPException(502, "Не удалось отправить счёт")
-    db.refresh(delivery)
     return delivery
 
 
@@ -1872,7 +985,7 @@ def import_partner_payments(
     admin: User = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ) -> dict[str, int]:
-    _require_b2b_invoicing()
+    require_b2b_invoicing()
     source = payload.source.lower()
     external_ids = [record.external_id for record in payload.records]
     existing = set(
@@ -1968,7 +1081,7 @@ def admin_partner_payments(
     _admin: User = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ) -> list[PartnerPayment]:
-    _require_b2b_invoicing()
+    require_b2b_invoicing()
     query = select(PartnerPayment)
     if status:
         query = query.where(PartnerPayment.status == status)
@@ -1988,7 +1101,7 @@ def resolve_partner_payment(
     admin: User = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ) -> PartnerPayment:
-    _require_b2b_invoicing()
+    require_b2b_invoicing()
     payment = db.scalar(
         select(PartnerPayment)
         .where(
@@ -2064,7 +1177,7 @@ def update_partner_invoice_status(
     admin: User = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ) -> PartnerInvoice:
-    _require_b2b_invoicing()
+    require_b2b_invoicing()
     invoice = db.scalar(
         select(PartnerInvoice).where(PartnerInvoice.id == invoice_id).with_for_update()
     )
@@ -2112,7 +1225,7 @@ def update_partner_invoice_status(
         db.query(ProductLead).filter(ProductLead.invoice_id == invoice.id).update(
             {ProductLead.invoice_id: None}, synchronize_session=False
         )
-    audit_details = {"partner_id": invoice.partner_id}
+    audit_details: dict[str, Any] = {"partner_id": invoice.partner_id}
     if payload.status == "void":
         audit_details.update(
             {
@@ -2150,7 +1263,7 @@ def create_manual_partner_payment(
     admin: User = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ) -> PartnerPayment:
-    _require_b2b_invoicing()
+    require_b2b_invoicing()
     invoice = db.scalar(
         select(PartnerInvoice).where(PartnerInvoice.id == invoice_id).with_for_update()
     )
@@ -2200,58 +1313,3 @@ def create_manual_partner_payment(
         raise HTTPException(409, "Платёж с таким внешним ID уже зарегистрирован")
     db.refresh(payment)
     return payment
-
-
-@router.get("/partner/invoices", response_model=list[PartnerInvoiceRead])
-def partner_invoices(
-    offset: int = Query(default=0, ge=0),
-    limit: int = Query(default=50, ge=1, le=200),
-    member: PartnerMember = Depends(get_partner_member),
-    db: Session = Depends(get_db),
-) -> list[PartnerInvoice]:
-    _require_b2b_invoicing()
-    return list(
-        db.scalars(
-            select(PartnerInvoice)
-            .where(PartnerInvoice.partner_id == member.partner_id)
-            .order_by(PartnerInvoice.created_at.desc())
-            .offset(offset)
-            .limit(limit)
-        )
-    )
-
-
-@router.get("/partner/invoices/{invoice_id}/pdf")
-def partner_invoice_pdf(
-    invoice_id: int,
-    member: PartnerMember = Depends(get_partner_member),
-    db: Session = Depends(get_db),
-) -> Response:
-    _require_b2b_invoicing()
-    invoice = db.scalar(
-        select(PartnerInvoice).where(
-            PartnerInvoice.id == invoice_id,
-            PartnerInvoice.partner_id == member.partner_id,
-        )
-    )
-    if not invoice:
-        raise HTTPException(404, "Счёт не найден")
-    return _invoice_pdf_response(invoice)
-
-
-@router.get("/partner/invoices/{invoice_id}/cancellation.pdf")
-def partner_invoice_cancellation_pdf(
-    invoice_id: int,
-    member: PartnerMember = Depends(get_partner_member),
-    db: Session = Depends(get_db),
-) -> Response:
-    _require_b2b_invoicing()
-    invoice = db.scalar(
-        select(PartnerInvoice).where(
-            PartnerInvoice.id == invoice_id,
-            PartnerInvoice.partner_id == member.partner_id,
-        )
-    )
-    if not invoice:
-        raise HTTPException(404, "Счёт не найден")
-    return _invoice_cancellation_pdf_response(invoice)

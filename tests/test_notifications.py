@@ -145,7 +145,7 @@ def test_diagnosis_ready_notification_once_and_with_degraded_warning(client, mon
 
 
 def test_diagnosis_failed_notification_after_exhausted_retries(client, monkeypatch):
-    import app.main as main_module
+    import app.gateway as gateway_module
     from app.ai.base import AIProviderError
 
     headers, plant_id = _register_with_telegram(client, "diag-failed@example.com")
@@ -169,7 +169,7 @@ def test_diagnosis_failed_notification_after_exhausted_retries(client, monkeypat
                 response_ms=100,
             )
 
-    monkeypatch.setattr(main_module, "ai_gateway", FailingGateway())
+    monkeypatch.setattr(gateway_module, "ai_gateway", FailingGateway())
     job = client.post(
         "/api/v1/diagnoses/async",
         headers=headers,

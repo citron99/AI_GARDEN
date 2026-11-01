@@ -316,7 +316,7 @@ class Diagnosis(Base):
     prompt_version: Mapped[str] = mapped_column(String(80), default="mock-v1")
     current_revision: Mapped[int] = mapped_column(Integer, default=1)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utcnow
+        DateTime(timezone=True), default=utcnow, index=True
     )
 
     photos: Mapped[list[PlantPhoto]] = relationship(
@@ -452,7 +452,7 @@ class AIRequestLog(Base):
     response_ms: Mapped[int] = mapped_column(Integer, default=0)
     estimated_cost: Mapped[float] = mapped_column(Float, default=0)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utcnow
+        DateTime(timezone=True), default=utcnow, index=True
     )
 
 
@@ -503,7 +503,7 @@ class DiagnosisJob(Base):
     error_type: Mapped[str | None] = mapped_column(String(80), nullable=True)
     error_message: Mapped[str | None] = mapped_column(String(300), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utcnow
+        DateTime(timezone=True), default=utcnow, index=True
     )
     started_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
@@ -953,7 +953,7 @@ class ProductLead(Base):
     )
     redirect_count: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utcnow
+        DateTime(timezone=True), default=utcnow, index=True
     )
 
 
