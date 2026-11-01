@@ -25,17 +25,21 @@ CI дополнительно прогоняет `pip-audit` по обоим л�
 редактируются вручную:
 
 ```powershell
-uv pip compile requirements.txt --python-version 3.12 --generate-hashes --output-file requirements.lock
+uv pip compile requirements.txt --python-version 3.12 --generate-hashes `
+  --constraint requirements.lock --output-file requirements.lock
 uv pip compile requirements-dev.txt --python-version 3.12 --generate-hashes `
   --constraint requirements-dev.lock --output-file requirements-dev.lock
 ```
 
-`--constraint` на сам лок замораживает транзитивные версии: без него перегенерация
-поднимает ~45 косвенных пакетов. Флаг `--no-strip-extras` не использовать — с ним в локе
-остаётся `uvicorn[standard]`, а `pip install --require-hashes` на Linux тогда требует все
-зависимости экстры; `uvloop` (`sys_platform != 'win'`) при сборке лока на Windows не
-резолвится и в лок не попадает, из-за чего CI падает. Зависимости экстры при этом остаются
-в локе отдельными строками (`httptools`, `watchfiles`, `websockets`, `python-dotenv`).
+`--constraint` на предыдущий лок замораживает транзитивные версии: без него перегенерация
+поднимает ~45 косвенных пакетов. При подъёме конкретной версии её имя нужно исключить из
+файла ограничений (uv иначе сообщит `No solution found`), поэтому перегенерацию удобно
+делать в отдельной папке с тем же именем файла. Флаг `--no-strip-extras` не использовать —
+с ним в локе остаётся `uvicorn[standard]`, а `pip install --require-hashes` на Linux тогда
+требует все зависимости экстры; `uvloop` (`sys_platform != 'win'`) при сборке лока на
+Windows не резолвится и в лок не попадает, из-за чего CI падает. Зависимости экстры при
+этом остаются в локе отдельными строками (`httptools`, `watchfiles`, `websockets`,
+`python-dotenv`).
 
 Паритет с Linux-CI проверяется без Docker:
 
@@ -44,7 +48,9 @@ uv pip install --dry-run --require-hashes --python-platform x86_64-manylinux_2_2
 ```
 
 Если нужно добавить пакет в CI, добавьте его в `requirements-dev.txt` и перегенерируйте
-лог. Ручная правка `*.lock` ломает `pip install --require-hashes`.
+лог. Ручная правка `*.lock` ломает `pip install --require-hashes`. Уязвимые версии
+проверяет `pip-audit` в CI; косвенные зависимости с CVE пинятся напрямую в
+`requirements*.txt`, чтобы заморозка предыдущего лока не возвращала их назад.
 
 ## Структура кода
 
