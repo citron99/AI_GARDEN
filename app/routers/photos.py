@@ -43,12 +43,14 @@ def _owned_photo(photo_id: int, user: User, db: Session) -> PlantPhoto:
 
 
 @router.post("/plants/{plant_id}/photos", response_model=list[PhotoRead], status_code=201)
-async def upload_photos(
+def upload_photos(
     plant_id: int,
     files: list[UploadFile] = File(...),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> list[PlantPhoto]:
+    # Синхронный эндпоинт выполняется в threadpool: декодирование JPEG, PUT в S3 и
+    # Redis-лимитер блокируют надолго, а в async-версии встали бы на них весь event loop.
     enforce_rate_limit(
         "photo_upload",
         str(user.id),
@@ -62,7 +64,7 @@ async def upload_photos(
     for upload in files:
         if upload.content_type not in _ALLOWED_UPLOAD_TYPES:
             raise HTTPException(415, "Поддерживаются только JPEG, PNG и WebP")
-        content = await upload.read(settings.max_image_size_mb * 1024 * 1024 + 1)
+        content = upload.file.read(settings.max_image_size_mb * 1024 * 1024 + 1)
         if len(content) > settings.max_image_size_mb * 1024 * 1024:
             raise HTTPException(413, f"Размер файла превышает {settings.max_image_size_mb} МБ")
         try:

@@ -165,7 +165,7 @@ def _csv_boolean(value: str | None, *, default: bool = True) -> bool:
 
 
 @router.post("/partner/products/import/csv")
-async def import_partner_products_csv(
+def import_partner_products_csv(
     file: UploadFile = File(...),
     member: PartnerMember = Depends(get_partner_member),
     db: Session = Depends(get_db),
@@ -178,7 +178,8 @@ async def import_partner_products_csv(
         "application/vnd.ms-excel",
     }:
         raise HTTPException(415, "Поддерживается только CSV")
-    raw = await file.read(2 * 1024 * 1024 + 1)
+    # Чтение и апсерт до 1000 строк блокирующие, поэтому эндпоинт синхронный.
+    raw = file.file.read(2 * 1024 * 1024 + 1)
     if len(raw) > 2 * 1024 * 1024:
         raise HTTPException(413, "CSV-файл слишком большой")
     try:
