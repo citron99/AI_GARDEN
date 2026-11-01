@@ -68,10 +68,12 @@ fi
 
 echo "--- pip install ---"
 "$VENV/bin/pip" install --no-input --upgrade pip >/dev/null 2>&1
+# Версии должны совпадать с requirements.txt / requirements.lock: этот список ставится
+# без хэш-лока, поэтому расхождение здесь CI не заметит.
 "$VENV/bin/pip" install --no-input --prefer-binary \
   "fastapi==0.139.0" "starlette==1.3.1" "sqlalchemy==2.0.41" "alembic==1.16.1" \
   "Mako==1.3.12" "pydantic-settings==2.9.1" "python-multipart==0.0.32" \
-  "pwdlib[argon2]==0.2.1" "argon2-cffi==23.1.0" "argon2-cffi-bindings==21.2.0" "PyJWT==2.13.0" "Pillow==10.4.0" \
+  "pwdlib[argon2]==0.2.1" "argon2-cffi==23.1.0" "argon2-cffi-bindings==21.2.0" "PyJWT==2.15.0" "Pillow==13.0.0" \
   "openai>=2.0,<3" "httpx[socks]==0.28.1" "boto3==1.43.45" "celery==5.6.3" \
   "reportlab>=4.4,<5" "a2wsgi" \
   || { echo "pip install failed"; rm -f "$LOCK"; exit 1; }
