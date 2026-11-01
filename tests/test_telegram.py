@@ -7,6 +7,7 @@ from sqlalchemy import select
 from app.config import settings
 from app.database import SessionLocal
 from app.models import TelegramAccount, TelegramLinkToken, TelegramUpdate
+from app.services import telegram_service
 from app.services.telegram_service import TelegramServiceError
 
 
@@ -136,3 +137,41 @@ def test_unsent_webhook_response_is_retried_without_reprocessing(client, monkeyp
     with SessionLocal() as db:
         assert db.scalar(select(TelegramUpdate).where(TelegramUpdate.update_id == 20)).sent is True
         assert db.query(TelegramAccount).count() == 1
+
+def test_today_window_ends_at_local_midnight_on_dst_switch(client, monkeypatch):
+    """29 марта 2026 в Europe/Riga сутки длятся 23 часа: шаг в 24 часа
+    прихватывал первый час следующего дня."""
+    from app.models import User
+
+    zone = ZoneInfo("Europe/Riga")
+    monkeypatch.setattr(settings, "telegram_timezone", "Europe/Riga")
+    headers = register(client, "dst@example.com")
+    garden = client.post("/api/v1/gardens", headers=headers, json={"name": "ДСТ-сад"}).json()
+    plant = client.post("/api/v1/plants", headers=headers, json={
+        "garden_id": garden["id"], "name": "Крыжовник", "growing_place": "open_ground",
+    }).json()
+    for title, due_at in (
+        ("Полить крыжовник", datetime(2026, 3, 29, 12, tzinfo=zone)),
+        ("Обновить подвязку", datetime(2026, 3, 30, 0, 30, tzinfo=zone)),
+    ):
+        created = client.post(
+            f"/api/v1/plants/{plant['id']}/reminders",
+            headers=headers,
+            json={"kind": "inspection", "title": title, "due_at": due_at.isoformat()},
+        )
+        assert created.status_code == 201
+
+    frozen = datetime(2026, 3, 29, 5, tzinfo=zone)
+
+    class FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return frozen.astimezone(tz) if tz is not None else frozen.replace(tzinfo=None)
+
+    monkeypatch.setattr(telegram_service, "datetime", FrozenDatetime)
+    with SessionLocal() as db:
+        user = db.scalar(select(User).where(User.email == "dst@example.com"))
+        answer = telegram_service._today(db, user.id, "ru")
+
+    assert "Полить крыжовник" in answer
+    assert "Обновить подвязку" not in answer

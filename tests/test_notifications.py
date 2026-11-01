@@ -1,5 +1,7 @@
 from datetime import UTC, datetime, timedelta
 
+import pytest
+from celery.exceptions import SoftTimeLimitExceeded
 from sqlalchemy import select
 from sqlalchemy.dialects import postgresql
 
@@ -39,6 +41,51 @@ def test_pending_notification_is_delivered_to_telegram_once(client, monkeypatch)
         assert item.telegram_sent_at is not None
         assert item.delivery_attempts == 1
     assert sent_messages == [(123456, "Seasonal task\nPrepare frost protection")]
+
+
+def test_already_sent_notifications_survive_killed_task(client, monkeypatch):
+    """Задача отдачи работает с task_acks_late и жёстким time_limit: после SIGKILL
+    она возвращается в очередь, поэтому уже отправленные сообщения должны быть
+    записаны. Общий commit на батч терял их вместе с прогрессом задачи."""
+    response = client.post("/api/v1/auth/register", json={
+        "email": "interrupted@example.com",
+        "name": "Interrupted",
+        "password": "strong-password",
+        "language": "en",
+    })
+    assert response.status_code == 201
+    now = datetime(2026, 7, 13, 8, tzinfo=UTC)
+    with SessionLocal() as db:
+        user = db.scalar(select(User).where(User.email == "interrupted@example.com"))
+        db.add(TelegramAccount(user_id=user.id, chat_id=246810, language="en", active=True))
+        for index in range(3):
+            db.add(UserNotification(
+                user_id=user.id,
+                kind="seasonal_task",
+                title=f"Task {index}",
+                body="Prepare frost protection",
+                event_at=now + timedelta(minutes=index),
+                deduplication_key=f"test:interrupted:{index}",
+            ))
+        db.commit()
+
+    calls = []
+
+    def send_until_killed(chat_id: int, text: str) -> None:
+        calls.append(text)
+        if len(calls) == 3:
+            raise SoftTimeLimitExceeded
+
+    monkeypatch.setattr(notification_service, "send_message", send_until_killed)
+    with SessionLocal() as db, pytest.raises(SoftTimeLimitExceeded):
+        notification_service.deliver_pending_telegram_notifications(db, now=now)
+
+    with SessionLocal() as db:
+        delivered = db.scalars(
+            select(UserNotification).where(UserNotification.telegram_sent_at.is_not(None))
+        ).all()
+        assert len(delivered) == 2
+        assert all(item.delivery_attempts == 1 for item in delivered)
 
 
 def test_pending_delivery_query_locks_rows_on_postgres():

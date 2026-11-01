@@ -288,12 +288,16 @@ def _retrieve_from_database(
         return _retrieve_static(query, limit, region, language)
     provider = create_embedding_provider()
     query_embedding = _query_embedding(provider, query)
+    today_start = datetime.combine(date.today(), time.min, tzinfo=UTC)
     base = (
         select(KnowledgeChunk)
         .join(KnowledgeChunk.source)
         .where(
             KnowledgeSourceRecord.active.is_(True),
-            KnowledgeSourceRecord.next_review_at >= datetime.now(UTC),
+            # Дата проверяется целиком, как в статической ветке (_retrieve_static):
+            # в колонке лежит полночь UTC, и сравнение с «сейчас» выбрасывало
+            # источник весь день, а не только после его окончания.
+            KnowledgeSourceRecord.next_review_at >= today_start,
         )
         .options(selectinload(KnowledgeChunk.source))
     )

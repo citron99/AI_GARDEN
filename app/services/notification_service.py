@@ -49,7 +49,10 @@ def generate_due_notifications(
 ) -> int:
     now = _aware(now or datetime.now(UTC)).astimezone(UTC)
     end = now + timedelta(hours=24)
-    existing = set(db.scalars(select(UserNotification.deduplication_key)))
+    # Все новые записи лежат в [now, end), поэтому для дедупликации хватит ключей
+    # этого же окна: без фильтра сюда каждый проход выгружается вся таблица,
+    # которая чистится только вручную.
+    existing = set(db.scalars(select(UserNotification.deduplication_key).where(UserNotification.event_at < end)))
     created = 0
 
     reminder_rows = db.execute(
@@ -143,5 +146,8 @@ def deliver_pending_telegram_notifications(db: Session, *, now: datetime | None 
             notification.telegram_sent_at = now
             notification.last_delivery_error = None
             sent += 1
-    db.commit()
+        # Задача выполняется в Celery с task_acks_late и жёстким time_limit: при
+        # убитом воркере она возвращается в очередь, а общий commit на весь батч
+        # означал бы повторную доставку уже ушедших сообщений.
+        db.commit()
     return sent, failed
