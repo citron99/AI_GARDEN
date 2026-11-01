@@ -4,7 +4,13 @@
 	request_body {
 		max_size {$MAX_REQUEST_BODY_MB:60}MB
 	}
-	reverse_proxy api:8000
+	reverse_proxy api:8000 {
+		# uvicorn (--proxy-headers) берёт клиента из ПЕРВОГО значения X-Forwarded-For,
+		# а Caddy по умолчанию дописывает свой хоп в конец. Значит гость мог прислать
+		# свой XFF и обойти лимиты авторизации (app/services/rate_limit_service.py).
+		# Мы единственный фронт до api, поэтому подставляем реального пира.
+		header_up X-Forwarded-For {remote_host}
+	}
 	log {
 		output stdout
 		format json
