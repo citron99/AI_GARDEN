@@ -3,6 +3,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 from sqlalchemy import and_, or_, select, update
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.ai import AIProviderError, create_ai_gateway
@@ -228,7 +229,18 @@ def process_diagnosis_job(
     del task_id  # Celery IDs are observability metadata; the DB lease is authoritative.
     gateway = gateway or worker_gateway
     with SessionLocal() as db:
-        job, execution_token = _claim_job(db, job_id)
+        try:
+            job, execution_token = _claim_job(db, job_id)
+        except SQLAlchemyError as exc:
+            # Сбой БД на захвате leased не видно ни одному восстановлению: воркер
+            # уже знает celery_task_id, а прогон maintenance берёт только queued без
+            # него. Возвращаем ссылку на задачу, пока retry ниже её не подхватил.
+            db.rollback()
+            pending = db.get(DiagnosisJob, job_id)
+            if pending is not None and pending.status == "queued" and pending.celery_task_id is not None:
+                pending.celery_task_id = None
+                db.commit()
+            raise RetryableDiagnosisJob("Фоновый анализ не смог начаться") from exc
         if not job or execution_token is None:
             return job.diagnosis_id if job and job.status == "succeeded" else None
 

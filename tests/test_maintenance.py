@@ -1,5 +1,6 @@
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from sqlalchemy import func, select
 
 from app.database import SessionLocal
@@ -196,3 +197,48 @@ def test_recovery_reserves_expired_and_orphaned_jobs_and_fails_exhausted_attempt
         assert db.get(DiagnosisJob, jobs[1].id).error_type == "lease_expired"
         assert db.get(DiagnosisJob, jobs[2].id).status == "running"
         assert db.get(DiagnosisJob, jobs[3].id).celery_task_id == result["task_ids"][jobs[3].id]
+
+
+def test_failed_lease_claim_returns_the_job_to_recovery(monkeypatch):
+    """Воркер, упавший на захвате leased, оставлял за собой celery_task_id, а
+    прогон восстановления берёт только queued без него — задача зависала
+    навсегда. Теперь ссылка сбрасывается, и задача идёт через retry."""
+    import app.services.diagnosis_job_service as job_service
+    from sqlalchemy.exc import OperationalError
+
+    job_id = "30000000-0000-0000-0000-000000000099"
+    now = datetime(2026, 7, 15, 12, tzinfo=UTC)
+    with SessionLocal() as db:
+        user = User(email="claim-fail@example.com", name="Claim", password_hash="unused")
+        db.add(user)
+        db.flush()
+        garden = Garden(user_id=user.id, name="Claim garden")
+        db.add(garden)
+        db.flush()
+        plant = Plant(garden_id=garden.id, name="Claim plant")
+        db.add(plant)
+        db.flush()
+        db.add(DiagnosisJob(
+            id=job_id,
+            user_id=user.id,
+            plant_id=plant.id,
+            status="queued",
+            operation="create",
+            payload={},
+            attempts=0,
+            created_at=now,
+            celery_task_id="task-before-crash",
+        ))
+        db.commit()
+
+    def refuse_claim(session, pending_job_id):
+        raise OperationalError("UPDATE diagnosis_jobs", {}, RuntimeError("database is locked"))
+
+    monkeypatch.setattr(job_service, "_claim_job", refuse_claim)
+    with pytest.raises(job_service.RetryableDiagnosisJob):
+        job_service.process_diagnosis_job(job_id)
+
+    with SessionLocal() as db:
+        job = db.get(DiagnosisJob, job_id)
+        assert job.status == "queued"
+        assert job.celery_task_id is None
