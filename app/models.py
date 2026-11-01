@@ -966,6 +966,13 @@ class ProductLead(Base):
 class Subscription(Base):
     __tablename__ = "subscriptions"
 
+    # 0012_billing кладёт на такие колонки и inline UNIQUE, и уникальный индекс.
+    # Модель обязана описывать оба объекта, иначе alembic check на Postgres считает
+    # констрейнт лишним и предложит его удалить. Имя не указываем: в миграции он
+    # inline-безымянный, Postgres присваивает ему подписочное имя сам, а SQLite вообще
+    # не хранит имена таких констрейнтов. Alembic сопоставляет их по набору колонок.
+    __table_args__ = (UniqueConstraint("user_id"),)
+
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), unique=True, index=True
@@ -997,6 +1004,8 @@ class Subscription(Base):
 class BillingEvent(Base):
     __tablename__ = "billing_events"
 
+    __table_args__ = (UniqueConstraint("provider_event_id"),)
+
     id: Mapped[int] = mapped_column(primary_key=True)
     provider_event_id: Mapped[str] = mapped_column(String(120), unique=True, index=True)
     event_type: Mapped[str] = mapped_column(String(100), index=True)
@@ -1008,6 +1017,8 @@ class BillingEvent(Base):
 
 class TelegramAccount(Base):
     __tablename__ = "telegram_accounts"
+
+    __table_args__ = (UniqueConstraint("user_id"), UniqueConstraint("chat_id"))
 
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(
@@ -1028,6 +1039,8 @@ class TelegramAccount(Base):
 class TelegramLinkToken(Base):
     __tablename__ = "telegram_link_tokens"
 
+    __table_args__ = (UniqueConstraint("token_hash"),)
+
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), index=True
@@ -1044,6 +1057,8 @@ class TelegramLinkToken(Base):
 
 class TelegramUpdate(Base):
     __tablename__ = "telegram_updates"
+
+    __table_args__ = (UniqueConstraint("update_id"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     update_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
@@ -1119,6 +1134,8 @@ class KnowledgeChunk(Base):
 
 class UserNotification(Base):
     __tablename__ = "user_notifications"
+
+    __table_args__ = (UniqueConstraint("deduplication_key"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(
