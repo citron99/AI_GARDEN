@@ -151,10 +151,13 @@ class AuthSession(Base):
 
 class AccountDeletionRequest(Base):
     __tablename__ = "account_deletion_requests"
+    __table_args__ = (
+        UniqueConstraint("user_id", name="uq_account_deletion_request_user"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"), unique=True, index=True
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
     )
     status: Mapped[str] = mapped_column(
         String(40), default="pending_cancellation", index=True
@@ -198,16 +201,19 @@ class StorageDeletionOutbox(Base):
 
 class StorageMigrationRecord(Base):
     __tablename__ = "storage_migration_records"
+    __table_args__ = (
+        UniqueConstraint("photo_id", name="uq_storage_migration_photo"),
+        UniqueConstraint("storage_key", name="uq_storage_migration_key"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     photo_id: Mapped[int | None] = mapped_column(
         ForeignKey("plant_photos.id", ondelete="SET NULL"),
         nullable=True,
-        unique=True,
         index=True,
     )
     source_path: Mapped[str] = mapped_column(String(500))
-    storage_key: Mapped[str] = mapped_column(String(500), unique=True)
+    storage_key: Mapped[str] = mapped_column(String(500))
     checksum_sha256: Mapped[str] = mapped_column(String(64))
     size_bytes: Mapped[int] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
