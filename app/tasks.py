@@ -115,6 +115,11 @@ def dispatch_pending_invoice_deliveries_task() -> dict[str, int]:
             published += 1
         except Exception:  # noqa: BLE001 -- сбой публикации одной доставки считается, прогон продолжается
             publish_failed += 1
+    if publish_failed:
+        dispatch_operational_alert(
+            "invoice_deliveries_republish_failed",
+            details={"failed_count": publish_failed},
+        )
     return {
         "published": published,
         "publish_failed": publish_failed,
@@ -139,7 +144,13 @@ def cleanup_expired_records_task() -> dict[str, int]:
 @celery_app.task(name="maintenance.process_storage_deletion_outbox")
 def process_storage_deletion_outbox_task() -> dict[str, int]:
     with SessionLocal() as db:
-        return process_storage_deletion_outbox(db)
+        result = process_storage_deletion_outbox(db)
+    if result["failed"]:
+        dispatch_operational_alert(
+            "storage_deletion_outbox_failed",
+            details={"failed_count": result["failed"]},
+        )
+    return result
 
 
 @celery_app.task(name="maintenance.retry_account_deletions")

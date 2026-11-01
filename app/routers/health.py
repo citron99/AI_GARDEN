@@ -68,9 +68,9 @@ def readiness() -> dict:
         dispatch_operational_alert(
             "readiness_failed", details={"check": "database", "error_type": type(exc).__name__}
         )
-        raise HTTPException(
-            503, {"status": "not_ready", "check": "database", "error": str(exc)[:200]}
-        ) from exc
+        # Эндпоинт доступен без аутентификации (его опрашивает healthcheck), поэтому
+        # текст исключения остаётся в логе и алерте: в нём строка подключения к БД.
+        raise HTTPException(503, {"status": "not_ready", "check": "database"}) from exc
     if settings.diagnosis_execution_mode == "celery":
         try:
             from redis import Redis
@@ -90,9 +90,7 @@ def readiness() -> dict:
             dispatch_operational_alert(
                 "readiness_failed", details={"check": "queue", "error_type": type(exc).__name__}
             )
-            raise HTTPException(
-                503, {"status": "not_ready", "check": "queue", "error": str(exc)[:200]}
-            ) from exc
+            raise HTTPException(503, {"status": "not_ready", "check": "queue"}) from exc
     return {"status": "ready", "checks": checks}
 
 
