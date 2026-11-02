@@ -552,7 +552,10 @@ function renderDiagnosisQuality(report) {
   report.signals.forEach((signal) => {
     const row = element("article", `quality-signal ${signal.status}`);
     row.append(element("strong", "", signal.label));
-    row.append(element("span", "", `${qualityValue(signal.actual)} · ${signal.direction === "minimum" ? "минимум" : "максимум"} ${signal.threshold}`));
+    const detail = element("span", "", `${qualityValue(signal.actual)} · `);
+    detail.append(document.createTextNode(signal.direction === "minimum" ? "минимум" : "максимум"));
+    detail.append(document.createTextNode(` ${signal.threshold}`));
+    row.append(detail);
     signals.append(row);
   });
   const regressions = byId("qualityRegressions");
@@ -591,7 +594,9 @@ function renderDiagnosisQuality(report) {
     row.append(bar, element("strong", "", `${point.success_rate}% · ${point.diagnoses} diag`));
     trend.append(row);
   });
-  byId("qualityEvidence").textContent = `Evidence: ${report.evidence.diagnosis_records} diagnoses · ${report.evidence.ai_request_logs} AI logs · ${report.evidence.feedback_records} feedback · ${report.evidence.safety_adjustments} safety adjustments. ${report.evidence.complete ? "Контур данных достаточен для мониторинга." : "Низкое покрытие feedback — выводы ограничены."}`;
+  const evidence = byId("qualityEvidence");
+  evidence.textContent = `Evidence: ${report.evidence.diagnosis_records} diagnoses · ${report.evidence.ai_request_logs} AI logs · ${report.evidence.feedback_records} feedback · ${report.evidence.safety_adjustments} safety adjustments. `;
+  evidence.append(report.evidence.complete ? "Контур данных достаточен для мониторинга." : "Низкое покрытие feedback — выводы ограничены.");
 }
 
 function diagnosisQualityPath() {

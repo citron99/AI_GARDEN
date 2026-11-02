@@ -218,7 +218,7 @@ def test_checkout_and_portal_use_server_side_subscription_data(client, monkeypat
 
 
 def test_paid_account_deletion_waits_for_stripe_webhook(client, monkeypatch):
-    import app.main as main_module
+    import app.routers.users as users_module
 
     headers = register(client, "delete-paid@example.com")
     user_id = client.get("/api/v1/users/me", headers=headers).json()["id"]
@@ -235,7 +235,7 @@ def test_paid_account_deletion_waits_for_stripe_webhook(client, monkeypatch):
 
     cancellations = []
     monkeypatch.setattr(
-        main_module,
+        users_module,
         "cancel_stripe_subscription",
         lambda subscription_id, deleted_user_id: cancellations.append(
             (subscription_id, deleted_user_id)

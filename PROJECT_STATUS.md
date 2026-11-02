@@ -1,13 +1,13 @@
 # AI Garden — итоговый чек-лист проекта
 
-Статус на 2026-09-24. Проект развёрнут локально в Docker, все проверки пройдены.
+Статус на 2026-11-02. Проект развёрнут локально в Docker, все проверки пройдены.
 
 ## 1. Стек и архитектура
 
-- **Backend:** FastAPI (Python 3.12), монолит `app/main.py` + сервисы в `app/services/`
+- **Backend:** FastAPI (Python 3.12): эндпоинты разнесены по `app/routers/`, общая логика в `app/services/`, `app/main.py` — точка сборки приложения и обработчики ошибок
 - **БД:** SQLite в Docker (`/app/data/gardener.db`), в проде — PostgreSQL + pgvector (миграции Alembic, downgrade проверяется в CI)
 - **Фронтенд:** серверный ванильный JS (`web/app.js`, i18n ru/lv/en через `app/i18n.py` и `web/i18n.js`)
-- **Очереди:** собственный task queue (`app/task_queue.py`) с lease-механизмом (защита от двойных платных вызовов AI)
+- **Очереди:** Celery (`app/tasks.py`, broker — Redis) с диспетчером `app/task_queue.py` и lease-механизмом (защита от двойных платных вызовов AI); `DIAGNOSIS_EXECUTION_MODE=sync` выполняет задачу в процессе
 - **Интеграции:** Telegram, биллинг/подписки, погода, партнёрская атрибуция, метрики
 
 ## 2. AI-провайдеры ✅
@@ -38,14 +38,14 @@
 
 | Job | Что делает |
 |---|---|
-| `test` | `pip-audit`, `ruff check`, `pytest -q -o timeout_method=signal` (signal-метод — без оверхеда thread-метода на Linux) |
+| `test` | `pip-audit`, `ruff check`, `mypy` (рэтчет по `app/`, конфиг в `pyproject.toml`), `pytest -q -o timeout_method=signal` (signal-метод — без оверхеда thread-метода на Linux) |
 | `browser-e2e` | Playwright (chromium), артефакт отчёта при падении |
 | `docker-smoke` | сборка образа, подъём с `AI_PROVIDER=mock`, проверка `/health` |
 | `postgres-migrations` | реальный pgvector: `alembic upgrade head → check → downgrade base` + тесты конкуренции lease |
 
 ## 6. Тесты ✅
 
-- 24 тестовых файла в `tests/` (API, провайдеры, уведомления, биллинг, миграции, безопасность, хранилище и др.); 58 тестов в `test_api.py` + 36 провайдер/нотификации — все зелёные.
+- 23 тестовых модуля в `tests/`, 158 тестов (API, провайдеры, уведомления, биллинг, миграции, лимиты, безопасность, хранилище и др.) — все зелёные.
 - Целевые тесты фолбэка: `test_diagnosis_marks_degraded_response_from_fallback_provider` (включая проверку через `/plants/{id}/history`), `test_degraded_notice_follows_user_language`.
 
 ## 7. Исправления этого цикла
@@ -62,7 +62,7 @@ docker-compose -f compose.yaml up -d --build
 # API health: http://127.0.0.1:8000/health
 ```
 
-Локальная разработка: `.venv\Scripts\python.exe`, `pytest -q`, `ruff check app tests migrations evals`.
+Локальная разработка: `.venv\Scripts\python.exe`, `pytest -q`, `ruff check app tests migrations evals`, `mypy`. Правила для контрибьюторов — `CONTRIBUTING.md`.
 
 ## 9. Известные ограничения
 

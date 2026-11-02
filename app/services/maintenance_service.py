@@ -1,4 +1,5 @@
 from datetime import UTC, datetime, timedelta
+from typing import TypedDict
 from uuid import uuid4
 
 from sqlalchemy import and_, delete, or_, select
@@ -20,11 +21,16 @@ from app.services.product_registry_service import revalidate_registry_rules
 from app.services.storage_outbox_service import enqueue_photo_deletions
 
 
+class DiagnosisJobRecovery(TypedDict):
+    task_ids: dict[str, str]
+    failed: list[str]
+
+
 def recover_stale_diagnosis_jobs(
     db: Session,
     *,
     now: datetime | None = None,
-) -> dict[str, list[str] | dict[str, str]]:
+) -> DiagnosisJobRecovery:
     """Reserve expired or orphaned jobs for redelivery after this transaction commits."""
     now = now or datetime.now(UTC)
     orphaned_before = now - timedelta(seconds=settings.diagnosis_job_recovery_grace_seconds)

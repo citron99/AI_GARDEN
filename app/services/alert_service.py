@@ -56,8 +56,10 @@ def dispatch_operational_alert(
         return False
     now = time.monotonic()
     with _lock:
-        previous = _last_sent.get(event, 0)
-        if now - previous < settings.alert_min_interval_seconds:
+        # Сентинел 0 не годится: monotonic() на свежем Linux-раннере меньше окна
+        # интервала, и первый алерт навсегда считался бы залимитированным.
+        previous = _last_sent.get(event)
+        if previous is not None and now - previous < settings.alert_min_interval_seconds:
             return False
         _last_sent[event] = now
     body = _payload(event, severity, details or {})

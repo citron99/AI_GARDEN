@@ -116,7 +116,10 @@ def _today(db: Session, user_id: int, language: str) -> str:
     zone = ZoneInfo(settings.telegram_timezone)
     local_now = datetime.now(zone)
     start = datetime.combine(local_now.date(), time.min, tzinfo=zone).astimezone(UTC)
-    end = start + timedelta(days=1)
+    # До полуночи следующего локального дня, а не через 24 часа: в день перехода
+    # на летнее время и обратно сутки длятся 23 или 25 часов, и фиксированный шаг
+    # либо захватывает час завтра, либо теряет час сегодняшних задач.
+    end = datetime.combine(local_now.date() + timedelta(days=1), time.min, tzinfo=zone).astimezone(UTC)
     rows = db.execute(
         select(Reminder, Plant.name)
         .join(Plant, Plant.id == Reminder.plant_id)

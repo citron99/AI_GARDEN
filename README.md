@@ -3,6 +3,9 @@
 Portfolio case: **Diagnosis Quality Cockpit** turns diagnosis logs, user feedback, safety
 adjustments, latency and provider/prompt versions into privacy-safe operational quality evidence.
 
+Правила для разработчиков (проверки перед коммитом, структура, миграции, переводы) —
+в [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## Возможности
 
 - регистрация с подтверждением email, восстановление пароля, rotatable refresh-сессии,

@@ -88,6 +88,7 @@ services:
   migrate:
     build: .
     command: ["alembic", "upgrade", "head"]
+    env_file: .env
     environment: *runtime-environment
     depends_on:
       db:
@@ -99,6 +100,7 @@ services:
 
   api:
     build: .
+    env_file: .env
     environment: *runtime-environment
     expose:
       - "8000"
@@ -139,6 +141,7 @@ services:
   worker:
     build: .
     command: ["celery", "-A", "app.tasks.celery_app", "worker", "--loglevel=INFO", "--concurrency=2"]
+    env_file: .env
     environment: *runtime-environment
     depends_on:
       db:
@@ -155,6 +158,7 @@ services:
   beat:
     build: .
     command: ["celery", "-A", "app.tasks.celery_app", "beat", "--loglevel=INFO", "--schedule=/tmp/celerybeat-schedule"]
+    env_file: .env
     environment: *runtime-environment
     depends_on:
       db:

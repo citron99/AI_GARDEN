@@ -1,4 +1,4 @@
-from datetime import UTC, datetime, time, timedelta
+from datetime import UTC, datetime, time, timedelta, tzinfo
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import select
@@ -49,7 +49,10 @@ def generate_due_notifications(
 ) -> int:
     now = _aware(now or datetime.now(UTC)).astimezone(UTC)
     end = now + timedelta(hours=24)
-    existing = set(db.scalars(select(UserNotification.deduplication_key)))
+    # Все новые записи лежат в [now, end), поэтому для дедупликации хватит ключей
+    # этого же окна: без фильтра сюда каждый проход выгружается вся таблица,
+    # которая чистится только вручную.
+    existing = set(db.scalars(select(UserNotification.deduplication_key).where(UserNotification.event_at < end)))
     created = 0
 
     reminder_rows = db.execute(
@@ -72,8 +75,11 @@ def generate_due_notifications(
                         delivery_channel=reminder.preferred_channel)
 
     users = list(db.scalars(select(User).order_by(User.id)))
+    gardens_by_user: dict[int, list[Garden]] = {}
+    for garden in db.scalars(select(Garden).order_by(Garden.user_id, Garden.id)):
+        gardens_by_user.setdefault(garden.user_id, []).append(garden)
     for user in users:
-        gardens = list(db.scalars(select(Garden).where(Garden.user_id == user.id).order_by(Garden.id)))
+        gardens = gardens_by_user.get(user.id, [])
         for item in seasonal_calendar_items(gardens, user, now, end):
             created += _add(
                 db, existing, user_id=user.id, kind="seasonal_task", title=item["title"],
@@ -91,7 +97,7 @@ def generate_due_notifications(
             except WeatherServiceError:
                 continue
             try:
-                zone = ZoneInfo(forecast.timezone)
+                zone: tzinfo = ZoneInfo(forecast.timezone)
             except ZoneInfoNotFoundError:
                 zone = UTC
             for warning in forecast.warnings:
@@ -140,5 +146,8 @@ def deliver_pending_telegram_notifications(db: Session, *, now: datetime | None 
             notification.telegram_sent_at = now
             notification.last_delivery_error = None
             sent += 1
-    db.commit()
+        # Задача выполняется в Celery с task_acks_late и жёстким time_limit: при
+        # убитом воркере она возвращается в очередь, а общий commit на весь батч
+        # означал бы повторную доставку уже ушедших сообщений.
+        db.commit()
     return sent, failed

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import secrets
 from datetime import UTC, datetime
 
 from sqlalchemy import select
@@ -10,20 +11,27 @@ from app.database import SessionLocal
 from app.models import Partner, PartnerMember, User
 
 DEMO_ACCOUNTS = (
-    ("demo@ai-garden.local", "Demo Gardener", "GardenDemo2026!", False),
-    ("partner@ai-garden.local", "Demo Partner", "PartnerDemo2026!", False),
-    ("admin@ai-garden.local", "Demo Administrator", "AdminDemo2026!", True),
+    ("demo@ai-garden.local", "Demo Gardener", False),
+    ("partner@ai-garden.local", "Demo Partner", False),
+    ("admin@ai-garden.local", "Demo Administrator", True),
 )
 
 
-def seed_demo_users() -> None:
+def seed_demo_users() -> dict[str, str]:
+    """Создаёт демо-пользователей со случайными паролями.
+
+    Возвращает словарь email → password для вывода в консоль.
+    """
     if settings.environment == "production":
         raise RuntimeError("Demo users must never be seeded in production")
 
     now = datetime.now(UTC)
+    passwords: dict[str, str] = {}
     with SessionLocal() as db:
         users: dict[str, User] = {}
-        for email, name, password, is_admin in DEMO_ACCOUNTS:
+        for email, name, is_admin in DEMO_ACCOUNTS:
+            password = secrets.token_urlsafe(16)
+            passwords[email] = password
             user = db.scalar(select(User).where(User.email == email))
             if user is None:
                 user = User(email=email, name=name, password_hash="")
@@ -68,17 +76,18 @@ def seed_demo_users() -> None:
             membership.role = "owner"
         membership.active = True
         db.commit()
+    return passwords
 
 
 def main() -> int:
-    seed_demo_users()
-    for email, _name, password, is_admin in DEMO_ACCOUNTS:
+    passwords = seed_demo_users()
+    for email, _name, is_admin in DEMO_ACCOUNTS:
         role = (
             "admin"
             if is_admin
             else ("partner" if email.startswith("partner") else "gardener")
         )
-        print(f"{role}: {email} / {password}")
+        print(f"{role}: {email} / {passwords[email]}")
     return 0
 
 

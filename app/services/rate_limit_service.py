@@ -31,9 +31,11 @@ def enforce_rate_limit(
             from redis import Redis
 
             client = Redis.from_url(settings.celery_broker_url, socket_connect_timeout=1, socket_timeout=1)
-            count = client.incr(key)
-            if count == 1:
-                client.expire(key, window)
+            # TTL должен ставиться той же командой, что создаёт счётчик: если между
+            # INCR и отдельным EXPIRE обрывается соединение, ключ остаётся без срока
+            # жизни — и блокировка по нему тоже никогда не сбрасывается.
+            client.set(key, 0, nx=True, ex=window)
+            count = int(client.incr(key))
             if count > limit:
                 raise HTTPException(429, "Слишком много попыток. Повторите позже")
             return

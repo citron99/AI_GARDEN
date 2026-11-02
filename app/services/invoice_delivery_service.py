@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select, update
@@ -12,6 +13,8 @@ from app.services.invoice_service import (
     load_verified_invoice_pdf,
     send_invoice_email,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def process_invoice_delivery(delivery_id: int) -> str | None:
@@ -44,7 +47,10 @@ def process_invoice_delivery(delivery_id: int) -> str | None:
             invoice_number = invoice.invoice_number
             admin_id = delivery.requested_by_admin_id
             recipient = delivery.recipient
-    except Exception as exc:  # noqa: BLE001 -- любая ошибка отправки фиксируется в статусе доставки
+    except Exception as exc:  # любая ошибка отправки фиксируется в статусе доставки
+        # В базе остаётся только имя класса исключения, поэтому трейс — в лог:        # иначе невозможно отличить отказ адреса от падения SMTP.
+        logger.exception("invoice_delivery_failed", extra={"delivery_id": delivery_id})
+        logger.exception("invoice_delivery_failed", extra={"delivery_id": delivery_id})
         with SessionLocal() as db:
             delivery = db.get(PartnerInvoiceDelivery, delivery_id)
             if delivery and delivery.status == "sending":
