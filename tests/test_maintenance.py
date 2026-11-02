@@ -203,8 +203,9 @@ def test_failed_lease_claim_returns_the_job_to_recovery(monkeypatch):
     """Воркер, упавший на захвате leased, оставлял за собой celery_task_id, а
     прогон восстановления берёт только queued без него — задача зависала
     навсегда. Теперь ссылка сбрасывается, и задача идёт через retry."""
-    import app.services.diagnosis_job_service as job_service
     from sqlalchemy.exc import OperationalError
+
+    import app.services.diagnosis_job_service as job_service
 
     job_id = "30000000-0000-0000-0000-000000000099"
     now = datetime(2026, 7, 15, 12, tzinfo=UTC)

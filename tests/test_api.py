@@ -171,8 +171,9 @@ def test_demo_login_can_be_disabled_outside_production(client, monkeypatch):
 def test_readiness_failure_hides_internal_error_text(client, monkeypatch):
     """Healthcheck опрашивает /health/ready без токена, поэтому причина сбоя
     остаётся в логе и алерте: в тексте исключения бывает строка подключения к базе."""
-    import app.routers.health as health_module
     from sqlalchemy.exc import OperationalError
+
+    import app.routers.health as health_module
 
     def refuse(*args, **kwargs):
         raise OperationalError("SELECT 1", {}, Exception("sqlite:///secret.db?password=hunter2"))
