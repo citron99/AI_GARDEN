@@ -275,6 +275,10 @@ def validate_runtime_settings() -> None:
             raise RuntimeError(
                 "Production-запуск требует DIAGNOSIS_EXECUTION_MODE=celery"
             )
+        if settings.email_delivery_mode != "smtp":
+            raise RuntimeError(
+                "Production-запуск с EMAIL_DELIVERY_MODE=log запрещён; требуется SMTP"
+            )
         if settings.storage_backend != "s3" or not all(
             (
                 settings.s3_bucket,
