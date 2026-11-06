@@ -73,11 +73,11 @@ echo "--- pip install ---"
 # celery[redis] rate_limit_service и /health/ready падают в 503 на DIAGNOSIS_EXECUTION_MODE=celery.
 "$VENV/bin/pip" install --no-input --prefer-binary \
   "fastapi==0.141.1" "starlette==1.3.1" "sqlalchemy==2.0.41" "alembic==1.20.0" \
-  "Mako==1.3.12" "pydantic-settings==2.9.1" "python-multipart==0.0.32" \
-  "pwdlib[argon2]==0.3.1" "argon2-cffi==23.1.0" "argon2-cffi-bindings==25.1.0" "PyJWT==2.15.0" "Pillow==13.0.0" \
-  "openai>=3.19.2,<4" "httpx[socks]==0.28.1" "boto3==1.43.103" "celery[redis]==5.6.3" \
+  "Mako==1.4.3" "pydantic-settings==2.16.2" "python-multipart==0.0.32" \
+  "pwdlib[argon2]==0.3.1" "argon2-cffi==23.1.0" "argon2-cffi-bindings==25.1.0" "PyJWT==2.15.1" "Pillow==13.0.0" \
+  "openai>=3.42.0,<4" "httpx[socks]==0.28.1" "boto3==1.43.123" "celery[redis]==5.6.3" \
   "certifi==2026.10.18" "urllib3==2.8.0" \
-  "reportlab>=4.4,<5" "a2wsgi" \
+  "reportlab>=5.1.0,<6" "a2wsgi" \
   || { echo "pip install failed"; rm -f "$LOCK"; exit 1; }
 
 echo "--- data dir / .env ---"
