@@ -35,7 +35,7 @@
   <main>
     <section id="authView" class="auth-shell">
       <div class="hero-copy">
-        <p class="eyebrow">Садовый помощник</p>
+        <p class="section-context">Садовый помощник</p>
         <h1>Разберитесь, что происходит с растением</h1>
         <p class="lead">Загрузите фотографии, опишите симптомы и получите осторожную предварительную оценку с уточняющими вопросами.</p>
         <ul class="feature-list">
@@ -89,12 +89,14 @@
         </div>
         <form id="gardenForm" class="compact-form hidden">
           <input name="name" placeholder="Название сада" maxlength="120" required>
+          <label>Тип сада
           <select name="kind">
             <option value="garden">Сад</option>
             <option value="greenhouse">Теплица</option>
             <option value="balcony">Балкон</option>
             <option value="indoor">Дом</option>
           </select>
+          </label>
           <input name="location" placeholder="Город или регион для прогноза" maxlength="160">
           <button class="button small" type="submit">Сохранить</button>
         </form>
@@ -112,12 +114,14 @@
           <input name="name" placeholder="Название растения" maxlength="120" required>
           <input name="species" placeholder="Вид, если известен" maxlength="160">
           <input name="taxon_id" placeholder="Taxon ID (optional)" maxlength="100" pattern="[a-z0-9][a-z0-9_.:\-]{1,99}">
+          <label>Место выращивания
           <select name="growing_place">
             <option value="greenhouse">Теплица</option>
             <option value="open_ground">Открытый грунт</option>
             <option value="indoor">Дом</option>
             <option value="balcony">Балкон</option>
           </select>
+          </label>
           <button class="button small" type="submit">Сохранить</button>
         </form>
         <div id="plantList" class="nav-list"></div>
@@ -127,15 +131,15 @@
       <section class="content-column">
         <section id="adminWorkspace" class="admin-workspace hidden">
           <div class="card admin-header">
-            <div><p class="eyebrow">Система</p><h1>Административная панель</h1></div>
+            <div><p class="section-context">Система</p><h1>Административная панель</h1></div>
             <button id="refreshAdmin" class="button ghost" type="button">Обновить</button>
           </div>
           <p id="adminStatus" class="muted">Загружаем метрики…</p>
           <div id="adminMetrics" class="admin-metrics"></div>
           <section class="card admin-section diagnosis-quality-cockpit">
             <div class="quality-header">
-              <div><p class="eyebrow">Diagnosis Quality Cockpit</p><h2>Качество диагностики</h2><p class="muted">Наблюдаемость по feedback, safety, latency и версиям моделей. Без фотографий, симптомов и персональных данных.</p></div>
-              <strong id="qualityScore" class="quality-score">—<small>/100</small></strong>
+              <div><p class="section-context">Diagnosis Quality Cockpit</p><h2>Качество диагностики</h2><p class="muted">Наблюдаемость по feedback, safety, latency и версиям моделей. Без фотографий, симптомов и персональных данных.</p></div>
+              <strong id="qualityScore" class="quality-score">…<small>/100</small></strong>
             </div>
             <form id="qualityFilterForm" class="quality-filters">
               <label>Период<select name="days"><option value="7">7 дней</option><option value="30" selected>30 дней</option><option value="90">90 дней</option><option value="365">365 дней</option></select></label>
@@ -160,7 +164,7 @@
                 <strong>Новый партнёр</strong>
                 <input name="name" placeholder="Название" maxlength="160" required>
                 <input name="website_url" type="url" placeholder="https://partner.example" maxlength="500" required>
-                <select name="billing_plan"><option value="free">Free</option><option value="lead">Оплата за лид</option><option value="business">Business</option></select>
+                <label>Тариф партнёра<select name="billing_plan"><option value="free">Free</option><option value="lead">Оплата за лид</option><option value="business">Business</option></select></label>
                 <input name="monthly_fee_cents" type="number" min="0" max="10000000" value="0" placeholder="Абонплата, центы">
                 <input name="confirmed_lead_price_cents" type="number" min="0" max="1000000" value="0" placeholder="Цена подтверждённого лида, центы">
                 <input name="billing_currency" value="eur" pattern="[a-z]{3}" maxlength="3" aria-label="Валюта ISO 4217">
@@ -174,14 +178,14 @@
               </form>
               <form id="adminProductForm" class="compact-form">
                 <strong>Новый товар</strong>
-                <select id="adminProductPartner" name="partner_id" required></select>
+                <label>Партнёр<select id="adminProductPartner" name="partner_id" required></select></label>
                 <input name="name" placeholder="Название товара" maxlength="200" required>
                 <input name="sku" placeholder="SKU (optional)" maxlength="100" pattern="[A-Za-z0-9._:\-]+">
-                <select name="category"><option value="tools">Инструменты</option><option value="nutrition">Питание</option><option value="protection">Защита</option><option value="soil">Грунт</option><option value="irrigation">Полив</option><option value="other">Другое</option></select>
+                <label>Категория<select name="category"><option value="tools">Инструменты</option><option value="nutrition">Питание</option><option value="protection">Защита</option><option value="soil">Грунт</option><option value="irrigation">Полив</option><option value="other">Другое</option></select></label>
                 <input name="product_url" type="url" placeholder="https://partner.example/product" maxlength="500" required>
                 <input name="image_url" type="url" placeholder="HTTPS image URL (optional)" maxlength="500">
                 <input name="price_cents" type="number" min="0" max="100000000" placeholder="Price cents (optional)">
-                <select name="currency"><option value="eur">EUR</option><option value="usd">USD</option><option value="gbp">GBP</option></select>
+                <label>Валюта<select name="currency"><option value="eur">EUR</option><option value="usd">USD</option><option value="gbp">GBP</option></select></label>
                 <label><input name="in_stock" type="checkbox" checked> В наличии</label>
                 <input name="regions" placeholder="Регионы через запятую">
                 <textarea name="description" rows="2" maxlength="500" placeholder="Нейтральное описание без лечебных обещаний"></textarea>
@@ -190,9 +194,9 @@
             </div>
             <form id="adminPartnerMemberForm" class="compact-form member-form">
               <strong>Назначить сотрудника партнёра</strong>
-              <select id="adminMemberPartner" name="partner_id" required></select>
+              <label>Партнёр<select id="adminMemberPartner" name="partner_id" required></select></label>
               <input name="email" type="email" placeholder="Email зарегистрированного пользователя" maxlength="320" required>
-              <select name="role"><option value="owner">Владелец</option><option value="editor" selected>Редактор</option><option value="viewer">Наблюдатель</option></select>
+              <label>Роль сотрудника<select name="role"><option value="owner">Владелец</option><option value="editor" selected>Редактор</option><option value="viewer">Наблюдатель</option></select></label>
               <button class="button primary" type="submit">Назначить</button>
             </form>
             <div id="adminPartnerMembers" class="partner-chip-list"></div>
@@ -202,7 +206,7 @@
             <h2>Реестр регулируемых товаров</h2>
             <p class="muted">Импортируйте нормализованный снимок только из проверенного официального источника. Полный снимок помечает отсутствующие записи как недействующие.</p>
             <form id="adminRegistryImportForm" class="compact-form">
-              <select name="source_name" required><option value="vaad">VAAD</option><option value="eu_pesticides">EU Pesticides Database</option><option value="manual_verified">Проверено специалистом</option></select>
+              <label>Источник реестра<select name="source_name" required><option value="vaad">VAAD</option><option value="eu_pesticides">EU Pesticides Database</option><option value="manual_verified">Проверено специалистом</option></select></label>
               <input name="source_url" type="url" placeholder="HTTPS-ссылка на источник" maxlength="1000" required>
               <input name="source_version" placeholder="Версия или дата снимка" maxlength="120" required>
               <label><input name="complete_snapshot" type="checkbox"> Полный снимок источника</label>
@@ -213,8 +217,8 @@
             <div class="table-scroll"><table><thead><tr><th>Название</th><th>Юрисдикция</th><th>Регистрационный номер</th><th>Действует до</th><th>Статус</th><th>Источник</th></tr></thead><tbody id="adminRegistry"></tbody></table></div>
             <h3>Правило безопасной рекомендации</h3>
             <form id="adminRuleForm" class="compact-form member-form">
-              <select id="adminRuleProduct" name="product_id" required></select>
-              <select id="adminRuleRegistry" name="registry_entry_id"><option value="">Без записи реестра</option></select>
+              <label>Товар<select id="adminRuleProduct" name="product_id" required></select></label>
+              <label>Запись реестра<select id="adminRuleRegistry" name="registry_entry_id"><option value="">Без записи реестра</option></select></label>
               <input name="crop_name" placeholder="Культура" maxlength="160" required>
               <input name="plant_taxon_id" placeholder="Taxon ID (optional)" maxlength="100" pattern="[a-z0-9][a-z0-9_.:\-]{1,99}">
               <input name="problem_name" placeholder="Проблема" maxlength="200" required>
@@ -252,7 +256,7 @@
           <section class="card admin-section">
             <h2>Счета партнёрам</h2>
             <form id="adminInvoiceForm" class="compact-form member-form">
-              <select id="adminInvoicePartner" name="partner_id" required></select>
+              <label>Партнёр<select id="adminInvoicePartner" name="partner_id" required></select></label>
               <label>Начало периода<input name="period_start" type="date" required></label>
               <label>Конец периода (не включительно)<input name="period_end" type="date" required></label>
               <input name="due_days" type="number" min="1" max="90" value="14" aria-label="Срок оплаты, дней">
@@ -272,7 +276,7 @@
 
         <section id="partnerWorkspace" class="admin-workspace hidden">
           <div class="card admin-header">
-            <div><p class="eyebrow">Организация</p><h1 id="partnerTitle">Кабинет партнёра</h1></div>
+            <div><p class="section-context">Организация</p><h1 id="partnerTitle">Кабинет партнёра</h1></div>
             <button id="refreshPartner" class="button ghost" type="button">Обновить</button>
           </div>
           <p id="partnerStatus" class="muted"></p>
@@ -282,11 +286,11 @@
             <form id="partnerProductForm" class="compact-form product-partner-form">
               <input name="name" placeholder="Название товара" maxlength="200" required>
               <input name="sku" placeholder="SKU (optional)" maxlength="100" pattern="[A-Za-z0-9._:\-]+">
-              <select name="category"><option value="tools">Инструменты</option><option value="nutrition">Питание</option><option value="protection">Защита</option><option value="soil">Грунт</option><option value="irrigation">Полив</option><option value="other">Другое</option></select>
+              <label>Категория<select name="category"><option value="tools">Инструменты</option><option value="nutrition">Питание</option><option value="protection">Защита</option><option value="soil">Грунт</option><option value="irrigation">Полив</option><option value="other">Другое</option></select></label>
               <input name="product_url" type="url" placeholder="https://partner.example/product" maxlength="500" required>
               <input name="image_url" type="url" placeholder="HTTPS image URL (optional)" maxlength="500">
               <input name="price_cents" type="number" min="0" max="100000000" placeholder="Price cents (optional)">
-              <select name="currency"><option value="eur">EUR</option><option value="usd">USD</option><option value="gbp">GBP</option></select>
+              <label>Валюта<select name="currency"><option value="eur">EUR</option><option value="usd">USD</option><option value="gbp">GBP</option></select></label>
               <label><input name="in_stock" type="checkbox" checked> В наличии</label>
               <input name="regions" placeholder="Регионы через запятую">
               <textarea name="description" rows="2" maxlength="500" placeholder="Нейтральное описание без лечебных обещаний"></textarea>
@@ -311,7 +315,7 @@
 
         <section id="billingWorkspace" class="admin-workspace hidden">
           <div class="card admin-header">
-            <div><p class="eyebrow">Тариф</p><h1>Подписка AI Garden</h1></div>
+            <div><p class="section-context">Тариф</p><h1>Подписка AI Garden</h1></div>
             <button id="refreshBilling" class="button ghost" type="button">Обновить</button>
           </div>
           <p id="billingStatus" class="muted"></p>
@@ -333,7 +337,7 @@
 
         <section id="telegramWorkspace" class="admin-workspace hidden">
           <div class="card admin-header">
-            <div><p class="eyebrow">Уведомления</p><h1>Telegram-бот</h1></div>
+            <div><p class="section-context">Уведомления</p><h1>Telegram-бот</h1></div>
             <button id="refreshTelegram" class="button ghost" type="button">Обновить</button>
           </div>
           <section class="card admin-section telegram-connect">
@@ -343,7 +347,7 @@
               <div id="telegramLinkResult" class="telegram-link-result"></div>
             </div>
             <div class="entity-actions">
-              <button id="createTelegramLink" class="button primary" type="button">Получить одноразовую ссылку</button>
+              <button id="createTelegramLink" class="button primary" type="button">Получить ссылку</button>
               <button id="unlinkTelegram" class="button danger hidden" type="button">Отключить</button>
             </div>
           </section>
@@ -361,7 +365,7 @@
 
         <section id="calendarWorkspace" class="calendar-workspace card hidden">
           <div class="calendar-header">
-            <div><p class="eyebrow">Планирование</p><h1>Календарь сада</h1></div>
+            <div><p class="section-context">Планирование</p><h1>Календарь сада</h1></div>
             <form id="calendarRangeForm" class="calendar-range">
               <label>С<input id="calendarStart" name="start" type="date" required></label>
               <label>По<input id="calendarEnd" name="end" type="date" required></label>
@@ -387,7 +391,7 @@
         <div id="plantWorkspace" class="hidden">
           <div class="plant-header card">
             <div>
-              <p class="eyebrow">Растение</p>
+              <p class="section-context">Растение</p>
               <h1 id="plantTitle"></h1>
               <p id="plantDescription" class="muted"></p>
             </div>
@@ -400,7 +404,7 @@
 
           <section id="weatherPanel" class="weather-section card" data-dashboard-widget="weather">
             <div class="section-heading weather-heading">
-              <div><p class="eyebrow">Погода</p><h2>Прогноз для сада</h2></div>
+              <div><p class="section-context">Погода</p><h2>Прогноз для сада</h2></div>
               <button id="refreshWeather" class="button ghost" type="button">Обновить прогноз</button>
             </div>
             <p id="weatherStatus" class="muted">Загружаем прогноз…</p>
@@ -414,7 +418,7 @@
               <div class="step-label"><span>1</span> Фотографии</div>
               <label class="dropzone" for="photoInput">
                 <input id="photoInput" name="photos" type="file" accept="image/jpeg,image/png,image/webp" multiple required>
-                <strong>Выберите 1–5 фотографий</strong>
+                <strong>Выберите от 1 до 5 фотографий</strong>
                 <span>Крупный план повреждения, дневной рассеянный свет</span>
               </label>
               <div id="photoPreview" class="photo-preview"></div>
@@ -448,7 +452,7 @@
 
           <section id="carePanel" class="care-section card" data-dashboard-widget="care">
             <div class="section-heading">
-              <div><p class="eyebrow">Уход</p><h2>Журнал растения</h2></div>
+              <div><p class="section-context">Уход</p><h2>Журнал растения</h2></div>
             </div>
             <form id="careEventForm" class="care-form">
               <label>Действие
@@ -473,7 +477,7 @@
 
           <section id="reminderPanel" class="reminder-section card" data-dashboard-widget="reminders">
             <div class="section-heading">
-              <div><p class="eyebrow">План</p><h2>Напоминания</h2></div>
+              <div><p class="section-context">План</p><h2>Напоминания</h2></div>
             </div>
             <form id="reminderForm" class="reminder-form">
               <label>Тип
@@ -512,7 +516,7 @@
 
           <section id="historyPanel" class="history-section card" data-dashboard-widget="history">
             <div class="section-heading">
-              <div><p class="eyebrow">Хронология</p><h2>История диагностики</h2></div>
+              <div><p class="section-context">Хронология</p><h2>История диагностики</h2></div>
             </div>
             <div id="historyList" class="history-list"><p class="muted">Диагностик пока нет.</p></div>
           </section>
@@ -525,7 +529,7 @@
     <section class="card dashboard-settings-panel">
       <div class="section-heading dashboard-settings-heading">
         <div>
-          <p class="eyebrow">Настройки</p>
+          <p class="section-context">Настройки</p>
           <h2 id="dashboardSettingsTitle">Окна дашборда</h2>
         </div>
         <button id="closeDashboardSettings" class="icon-button" type="button" aria-label="Закрыть">×</button>
