@@ -76,17 +76,24 @@ function applyDashboardPreferences() {
   grid.classList.toggle("single-widget", diagnosisVisible !== resultVisible);
 }
 
+let dashboardBackgroundStates = [];
+
 function openDashboardSettings() {
   const modal = byId("dashboardSettingsModal");
   byId("dashboardSettingsForm").querySelectorAll("input[type='checkbox']").forEach((checkbox) => {
     checkbox.checked = state.dashboardWidgets[checkbox.value] !== false;
   });
+  dashboardBackgroundStates = [...document.querySelectorAll("body > header, body > main")]
+    .map((node) => ({ node, inert: node.inert }));
+  dashboardBackgroundStates.forEach(({ node }) => { node.inert = true; });
   modal.classList.remove("hidden");
   byId("closeDashboardSettings").focus();
 }
 
 function closeDashboardSettings() {
   byId("dashboardSettingsModal").classList.add("hidden");
+  dashboardBackgroundStates.forEach(({ node, inert }) => { node.inert = inert; });
+  dashboardBackgroundStates = [];
   byId("dashboardSettingsButton").focus();
 }
 
@@ -1280,7 +1287,7 @@ function renderBilling(plans, subscription) {
     const price = plan.monthly_amount === 0
       ? "Бесплатно"
       : new Intl.NumberFormat(uiLocale(), { style: "currency", currency: plan.currency.toUpperCase() }).format(plan.monthly_amount / 100) + ` ${t("/ месяц")}`;
-    card.append(element("span", "eyebrow", subscription.plan === plan.code ? "Текущий тариф" : "Тариф"));
+    card.append(element("p", "section-context", subscription.plan === plan.code ? "Текущий тариф" : "Тариф"));
     card.append(element("h2", "", plan.name), element("strong", "billing-price", price));
     const features = element("ul", "feature-list");
     plan.features.forEach((feature) => features.append(element("li", "", feature)));
@@ -2288,8 +2295,23 @@ byId("dashboardSettingsModal").addEventListener("click", (event) => {
   if (event.target === event.currentTarget) closeDashboardSettings();
 });
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && !byId("dashboardSettingsModal").classList.contains("hidden")) {
+  const modal = byId("dashboardSettingsModal");
+  if (modal.classList.contains("hidden")) return;
+  if (event.key === "Escape") {
     closeDashboardSettings();
+  } else if (event.key === "Tab") {
+    const controls = [...modal.querySelectorAll("button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), a[href], [tabindex]:not([tabindex='-1'])")]
+      .filter((node) => node.getClientRects().length > 0);
+    if (!controls.length) return;
+    const first = controls[0];
+    const last = controls[controls.length - 1];
+    if (event.shiftKey && (document.activeElement === first || !modal.contains(document.activeElement))) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && (document.activeElement === last || !modal.contains(document.activeElement))) {
+      event.preventDefault();
+      first.focus();
+    }
   }
 });
 byId("showGardenForm").addEventListener("click", () => {
