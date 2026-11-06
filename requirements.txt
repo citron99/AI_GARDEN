@@ -3,18 +3,18 @@ starlette==1.3.1
 uvicorn[standard]==0.54.0
 sqlalchemy==2.0.41
 alembic==1.20.0
-Mako==1.3.12
-pydantic-settings==2.9.1
+Mako==1.4.3
+pydantic-settings==2.16.2
 python-multipart==0.0.32
 pwdlib[argon2]==0.3.1
-PyJWT==2.15.0
+PyJWT==2.15.1
 Pillow==13.0.0
 psycopg[binary]==3.3.6
-openai>=3.19.2,<4
+openai>=3.42.0,<4
 httpx[socks]==0.28.1
-boto3==1.43.103
+boto3==1.43.123
 celery[redis]>=5.6.3,<6
-reportlab>=4.4,<5
+reportlab>=5.1.0,<6
 
 # Косвенные зависимости закреплены напрямую: pip-audit не пропускает уязвимые версии,
 # а без пина они уплыли бы при первой же перегенерации лока.
