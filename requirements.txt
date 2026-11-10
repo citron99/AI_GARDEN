@@ -12,7 +12,7 @@ Pillow==13.0.0
 psycopg[binary]==3.3.6
 openai>=3.42.0,<4
 httpx[socks]==0.28.1
-boto3==1.43.123
+boto3==1.43.126
 celery[redis]>=5.6.3,<6
 reportlab>=5.1.0,<6
 
